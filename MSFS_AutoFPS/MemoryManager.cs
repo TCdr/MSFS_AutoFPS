@@ -41,13 +41,13 @@ namespace MSFS_AutoFPS
                 else
                 {
                     MemoryInterface.Attach("FlightSimulator");
-                    moduleBase = MemoryInterface.GetModuleAddress(Model.SimModule);
+                    moduleBase = MemoryInterface.GetModuleAddress(Model.Offsets.SimModule);
                 }
 
                 GetActiveDXVersion();
-                Logger.Log(LogLevel.Debug, "MemoryManager:MemoryManager", $"Trying offsetModuleBase: 0x{model.OffsetModuleBase.ToString("X8")}");
+                Logger.Log(LogLevel.Debug, "MemoryManager:MemoryManager", $"Trying offsetModuleBase: 0x{model.Offsets.OffsetModuleBase.ToString("X8")}");
                 // Set initial base memory address to the one contained in the config file
-                if (Model.isMSFS2024) GetMSFSMemoryAddresses2024(Model.OffsetModuleBase);
+                if (Model.isMSFS2024) GetMSFSMemoryAddresses2024(Model.Offsets.OffsetModuleBase);
                 else GetMSFSMemoryAddresses();
                 // Run the memory boundary test to confirm that the offset is still valid
                 MemoryBoundaryTest();
@@ -63,17 +63,17 @@ namespace MSFS_AutoFPS
                 if (!allowMemoryWrites)
                 {
                     Logger.Log(LogLevel.Debug, "MemoryManager:MemoryManager", $"Module offset search failed to find a valid offset - memory writes disabled");
-                    if (Model.isMSFS2024) GetMSFSMemoryAddresses2024(Model.OffsetModuleBase);
+                    if (Model.isMSFS2024) GetMSFSMemoryAddresses2024(Model.Offsets.OffsetModuleBase);
                     else GetMSFSMemoryAddresses();
                     MemoryBoundaryTest(true);
                 }
                 // Otherwise reload the valid memory addresses and log the settings' initial values
                 else
                 {
-                    if (model.isMSFS2024) GetMSFSMemoryAddresses2024(Model.OffsetModuleBase);
+                    if (model.isMSFS2024) GetMSFSMemoryAddresses2024(Model.Offsets.OffsetModuleBase);
                     else GetMSFSMemoryAddresses();
                     VerifyAddresses();
-                } 
+                }
             }
             catch (Exception ex)
             {
@@ -87,25 +87,25 @@ namespace MSFS_AutoFPS
             bool offsetFound = false;
             long offset = 0;
 
-            long moduleBase = MemoryInterface.GetModuleAddress(Model.SimModule);
+            long moduleBase = MemoryInterface.GetModuleAddress(Model.Offsets.SimModule);
 
             // 0x004AF3C8 was muumimorko version offsetBase
             // 0x004B2368 was Fragtality version offsetBase
             Logger.Log(LogLevel.Debug, "MemoryManager:ModuleOffsetSearch", $"OffsetModuleBase search started");
-            
+
             while (offset < 0x100000 && !offsetFound)
             {
-                addrTLOD = MemoryInterface.ReadMemory<long>(moduleBase + offsetBase + offset) + Model.OffsetPointerMain;
+                addrTLOD = MemoryInterface.ReadMemory<long>(moduleBase + offsetBase + offset) + Model.Offsets.OffsetPointerMain;
                 if (addrTLOD > 0)
                 {
-                    addrTLOD_VR = MemoryInterface.ReadMemory<long>(addrTLOD) + Model.OffsetPointerTlodVr;
-                    addrTLOD = MemoryInterface.ReadMemory<long>(addrTLOD) + Model.OffsetPointerTlod;
-                    addrOLOD_VR = addrTLOD_VR + Model.OffsetPointerOlod;
-                    addrOLOD = addrTLOD + Model.OffsetPointerOlod;
-                    addrCloudQ = addrTLOD + Model.OffsetPointerCloudQ;
-                    addrCloudQ_VR = addrCloudQ + Model.OffsetPointerCloudQVr;
-                    addrVrMode = addrTLOD - Model.OffsetPointerVrMode;
-                    addrFgMode = addrTLOD - Model.OffsetPointerFgMode;
+                    addrTLOD_VR = MemoryInterface.ReadMemory<long>(addrTLOD) + Model.Offsets.OffsetPointerTlodVr;
+                    addrTLOD = MemoryInterface.ReadMemory<long>(addrTLOD) + Model.Offsets.OffsetPointerTlod;
+                    addrOLOD_VR = addrTLOD_VR + Model.Offsets.OffsetPointerOlod;
+                    addrOLOD = addrTLOD + Model.Offsets.OffsetPointerOlod;
+                    addrCloudQ = addrTLOD + Model.Offsets.OffsetPointerCloudQ;
+                    addrCloudQ_VR = addrCloudQ + Model.Offsets.OffsetPointerCloudQVr;
+                    addrVrMode = addrTLOD - Model.Offsets.OffsetPointerVrMode;
+                    addrFgMode = addrTLOD - Model.Offsets.OffsetPointerFgMode;
                     MemoryBoundaryTest();
                 }
                 if (allowMemoryWrites) offsetFound = true;
@@ -140,7 +140,7 @@ namespace MSFS_AutoFPS
             long step = 0x10;              // Keep small step size for precision
 
             int attempts = 0;
-            Model.OffsetSearchingActive = true;
+            Model.Offsets.OffsetSearchingActive = true;
             for (long testOffset = startOffset; testOffset < endOffset; testOffset += step)
             {
                 attempts++;
@@ -157,7 +157,7 @@ namespace MSFS_AutoFPS
                         Model.SetSetting("offsetModuleBase", "0x" + (testOffset).ToString("X8"));
                         Logger.Log(LogLevel.Debug, "MemoryManager:ModuleOffsetSearch", $"New offsetModuleBase found and saved: 0x{(testOffset).ToString("X8")}");
 
-                        Model.OffsetSearchingActive = false;
+                        Model.Offsets.OffsetSearchingActive = false;
                         return; // Exit the method if a valid offset is found
                     }
                 }
@@ -176,19 +176,35 @@ namespace MSFS_AutoFPS
 
             Logger.Log(LogLevel.Error, "MemoryManager:ModuleOffsetSearch",
                 $"Failed to find a valid module offset after {attempts} attempts");
-            Model.OffsetSearchingActive = false;
+            Model.Offsets.OffsetSearchingActive = false;
         }
 
         private void MemoryBoundaryTest(bool logResult = false)
         {
             // Boundary check a few known setting memory addresses to see if any fail which likely indicates MSFS memory map has changed
-            if (addrTLOD < 0 || GetTLOD_PC() < 10 || GetTLOD_PC() > 1000 || GetTLOD_VR() < 10 || GetTLOD_VR() > 1000
-                || GetOLOD_PC() < 10 || GetOLOD_PC() > 1000 || GetOLOD_VR() < 10 || GetOLOD_VR() > 1000
+            // Range checks like "< 10 || > 1000" silently let NaN through: IEEE754 NaN comparisons are always
+            // false, so a bad/garbage read that happens to decode as NaN would otherwise pass this check
+            // instead of correctly failing it - which is exactly what let an invalid module offset from
+            // ModuleOffsetSearch slip past validation and get written into MSFS memory. Explicit float.IsNaN
+            // checks close that gap.
+            float tlodPC = GetTLOD_PC();
+            float tlodVR = GetTLOD_VR();
+            float olodPC = GetOLOD_PC();
+            float olodVR = GetOLOD_VR();
+            // TLOD_VR/OLOD_VR read as a clean 0 (not garbage, not NaN) whenever VR hasn't been engaged yet
+            // this session - MSFS just hasn't initialized that memory. That's not evidence of a bad offset,
+            // so 0 is accepted for the VR fields specifically; PC fields have no such "not set yet" state
+            // and keep the strict range check. NaN still fails regardless (real corruption isn't 0).
+            if (addrTLOD < 0
+                || float.IsNaN(tlodPC) || tlodPC < 10 || tlodPC > 1000
+                || float.IsNaN(tlodVR) || (tlodVR != 0 && (tlodVR < 10 || tlodVR > 1000))
+                || float.IsNaN(olodPC) || olodPC < 10 || olodPC > 1000
+                || float.IsNaN(olodVR) || (olodVR != 0 && (olodVR < 10 || olodVR > 1000))
                 || GetCloudQ_PC() < 0 || GetCloudQ_PC() > 3 || GetCloudQ_VR() < 0 || GetCloudQ_VR() > 3
                 || MemoryInterface.ReadMemory<int>(addrVrMode) < 0 || MemoryInterface.ReadMemory<int>(addrVrMode) > 1
-                || MemoryInterface.ReadMemory<int>(addrTLOD + Model.OffsetPointerAnsio) < 0 || MemoryInterface.ReadMemory<int>(addrTLOD + Model.OffsetPointerAnsio) > 16
-                || (!Model.isMSFS2024 && !(MemoryInterface.ReadMemory<int>(addrTLOD + Model.OffsetPointerWaterWaves) == 128 || MemoryInterface.ReadMemory<int>(addrTLOD + Model.OffsetPointerWaterWaves) == 256 || MemoryInterface.ReadMemory<int>(addrTLOD + Model.OffsetPointerWaterWaves) == 512))
-                || (Model.isMSFS2024 && !(MemoryInterface.ReadMemory<int>(addrTLOD + Model.OffsetPointerCubeMap) >= 64 || MemoryInterface.ReadMemory<int>(addrTLOD + Model.OffsetPointerCubeMap) % 32 == 0 || MemoryInterface.ReadMemory<int>(addrTLOD + Model.OffsetPointerCubeMap) <= 384)))
+                || MemoryInterface.ReadMemory<int>(addrTLOD + Model.Offsets.OffsetPointerAnsio) < 0 || MemoryInterface.ReadMemory<int>(addrTLOD + Model.Offsets.OffsetPointerAnsio) > 16
+                || (!Model.isMSFS2024 && !(MemoryInterface.ReadMemory<int>(addrTLOD + Model.Offsets.OffsetPointerWaterWaves) == 128 || MemoryInterface.ReadMemory<int>(addrTLOD + Model.Offsets.OffsetPointerWaterWaves) == 256 || MemoryInterface.ReadMemory<int>(addrTLOD + Model.Offsets.OffsetPointerWaterWaves) == 512))
+                || (Model.isMSFS2024 && !(MemoryInterface.ReadMemory<int>(addrTLOD + Model.Offsets.OffsetPointerCubeMap) >= 64 || MemoryInterface.ReadMemory<int>(addrTLOD + Model.Offsets.OffsetPointerCubeMap) % 32 == 0 || MemoryInterface.ReadMemory<int>(addrTLOD + Model.Offsets.OffsetPointerCubeMap) <= 384)))
                 // Even though valid cube map values are 128, 196, 256 and 384 in MSFS 2024, one user encountered a value of 64 so the cube map test has been expanded to cover passing with this value, even if not technically a valid setting
             {
                 allowMemoryWrites = false;
@@ -204,9 +220,9 @@ namespace MSFS_AutoFPS
                 Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"Address CloudQ VR: 0x{addrCloudQ_VR:X}");
                 Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"Address VrMode: 0x{addrVrMode:X}");
                 Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"Address FgMode: 0x{addrFgMode:X}");
-                Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"Address Ansio Filter: 0x{(addrTLOD + Model.OffsetPointerAnsio):X}");
-                if (Model.isMSFS2024) Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"Address Cubemap Reflections: 0x{(addrTLOD + Model.OffsetPointerCubeMap):X}");
-                else Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"Address Water Waves: 0x{(addrTLOD + Model.OffsetPointerWaterWaves):X}");
+                Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"Address Ansio Filter: 0x{(addrTLOD + Model.Offsets.OffsetPointerAnsio):X}");
+                if (Model.isMSFS2024) Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"Address Cubemap Reflections: 0x{(addrTLOD + Model.Offsets.OffsetPointerCubeMap):X}");
+                else Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"Address Water Waves: 0x{(addrTLOD + Model.Offsets.OffsetPointerWaterWaves):X}");
                 Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"TLOD PC: {GetTLOD_PC()}");
                 Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"TLOD VR: {GetTLOD_VR()}");
                 Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"OLOD PC: {GetOLOD_PC()}");
@@ -215,24 +231,24 @@ namespace MSFS_AutoFPS
                 Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"Cloud Quality VR: {ServiceModel.CloudQualityText(GetCloudQ_VR())}");
                 Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"VR Mode: {MemoryInterface.ReadMemory<int>(addrVrMode)}");
                 Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"FG Mode: {MemoryInterface.ReadMemory<int>(addrFgMode)}");
-                Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"Ansio Filter: {MemoryInterface.ReadMemory<int>(addrTLOD + Model.OffsetPointerAnsio)}X");
-                if (Model.isMSFS2024) Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"Cubemap Reflections: {MemoryInterface.ReadMemory<int>(addrTLOD + Model.OffsetPointerCubeMap)}");
-                else Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"Water Waves: {MemoryInterface.ReadMemory<int>(addrTLOD + Model.OffsetPointerWaterWaves)}");
+                Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"Ansio Filter: {MemoryInterface.ReadMemory<int>(addrTLOD + Model.Offsets.OffsetPointerAnsio)}X");
+                if (Model.isMSFS2024) Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"Cubemap Reflections: {MemoryInterface.ReadMemory<int>(addrTLOD + Model.Offsets.OffsetPointerCubeMap)}");
+                else Logger.Log(LogLevel.Debug, "MemoryManager:MemoryBoundaryTest", $"Water Waves: {MemoryInterface.ReadMemory<int>(addrTLOD + Model.Offsets.OffsetPointerWaterWaves)}");
             }
         }
         private void GetMSFSMemoryAddresses()
         {
-            addrTLOD = MemoryInterface.ReadMemory<long>(moduleBase + Model.OffsetModuleBase) + Model.OffsetPointerMain;
+            addrTLOD = MemoryInterface.ReadMemory<long>(moduleBase + Model.Offsets.OffsetModuleBase) + Model.Offsets.OffsetPointerMain;
             if (addrTLOD > 0)
             {
-                addrTLOD_VR = MemoryInterface.ReadMemory<long>(addrTLOD) + Model.OffsetPointerTlodVr;
-                addrTLOD = MemoryInterface.ReadMemory<long>(addrTLOD) + Model.OffsetPointerTlod;
-                addrOLOD_VR = addrTLOD_VR + Model.OffsetPointerOlod;
-                addrOLOD = addrTLOD + Model.OffsetPointerOlod;
-                addrCloudQ = addrTLOD + Model.OffsetPointerCloudQ;
-                addrCloudQ_VR = addrCloudQ + Model.OffsetPointerCloudQVr;
-                addrVrMode = addrTLOD - Model.OffsetPointerVrMode;
-                addrFgMode = addrTLOD - Model.OffsetPointerFgMode;
+                addrTLOD_VR = MemoryInterface.ReadMemory<long>(addrTLOD) + Model.Offsets.OffsetPointerTlodVr;
+                addrTLOD = MemoryInterface.ReadMemory<long>(addrTLOD) + Model.Offsets.OffsetPointerTlod;
+                addrOLOD_VR = addrTLOD_VR + Model.Offsets.OffsetPointerOlod;
+                addrOLOD = addrTLOD + Model.Offsets.OffsetPointerOlod;
+                addrCloudQ = addrTLOD + Model.Offsets.OffsetPointerCloudQ;
+                addrCloudQ_VR = addrCloudQ + Model.Offsets.OffsetPointerCloudQVr;
+                addrVrMode = addrTLOD - Model.Offsets.OffsetPointerVrMode;
+                addrFgMode = addrTLOD - Model.Offsets.OffsetPointerFgMode;
                 if (allowMemoryWrites)
                 {
                     Logger.Log(LogLevel.Debug, "MemoryManager:GetMSFSMemoryAddresses", $"Address TLOD: 0x{addrTLOD:X} / {addrTLOD}");
@@ -255,18 +271,18 @@ namespace MSFS_AutoFPS
                 long pointer = pointerBase;
 
                 // Calculate addresses
-                addrTLOD = CalculateAddress(pointer, Model.OffsetPointerTlod, "TLOD");
-                addrOLOD = CalculateAddress(pointer, Model.OffsetPointerOlod, "OLOD");
-                addrTLOD_VR = CalculateAddress(pointer, Model.OffsetPointerTlodVr, "TLOD VR");
-                addrOLOD_VR = CalculateAddress(pointer, Model.OffsetPointerOlodVr, "OLOD VR"); 
+                addrTLOD = CalculateAddress(pointer, Model.Offsets.OffsetPointerTlod, "TLOD");
+                addrOLOD = CalculateAddress(pointer, Model.Offsets.OffsetPointerOlod, "OLOD");
+                addrTLOD_VR = CalculateAddress(pointer, Model.Offsets.OffsetPointerTlodVr, "TLOD VR");
+                addrOLOD_VR = CalculateAddress(pointer, Model.Offsets.OffsetPointerOlodVr, "OLOD VR");
 
                 // Calculate other addresses
-                addrVrMode = CalculateAddress(pointer, Model.OffsetPointerVrMode, "VR Mode");
-                addrCloudQ = CalculateAddress(pointer, Model.OffsetPointerCloudQ, "CloudQ");
-                addrCloudQ_VR = CalculateAddress(pointer, Model.OffsetPointerCloudQVr, "CloudQ VR");
-                addrFgMode = CalculateAddress(pointer, Model.OffsetPointerFgMode, "FG Mode");
-                addrDynSet = CalculateAddress(pointer, Model.OffsetPointerDynSet, "Dynamic Setting");
-                addrDynSetVR = CalculateAddress(pointer, Model.OffsetPointerDynSetVr, "Dynamic Setting VR");
+                addrVrMode = CalculateAddress(pointer, Model.Offsets.OffsetPointerVrMode, "VR Mode");
+                addrCloudQ = CalculateAddress(pointer, Model.Offsets.OffsetPointerCloudQ, "CloudQ");
+                addrCloudQ_VR = CalculateAddress(pointer, Model.Offsets.OffsetPointerCloudQVr, "CloudQ VR");
+                addrFgMode = CalculateAddress(pointer, Model.Offsets.OffsetPointerFgMode, "FG Mode");
+                addrDynSet = CalculateAddress(pointer, Model.Offsets.OffsetPointerDynSet, "Dynamic Setting");
+                addrDynSetVR = CalculateAddress(pointer, Model.Offsets.OffsetPointerDynSetVr, "Dynamic Setting VR");
 
                 return true;
             }
@@ -533,7 +549,7 @@ namespace MSFS_AutoFPS
             {
                 try
                 {
-                    MemoryInterface.WriteMemory<byte>(addrDynSet, value);
+                    MemoryInterface.WriteMemory<byte>(addrDynSet, (byte)(value ? 1 : 0));
                 }
                 catch (Exception ex)
                 {
@@ -548,7 +564,7 @@ namespace MSFS_AutoFPS
             {
                 try
                 {
-                    MemoryInterface.WriteMemory<byte>(addrDynSetVR, value);
+                    MemoryInterface.WriteMemory<byte>(addrDynSetVR, (byte)(value ? 1 : 0));
                 }
                 catch (Exception ex)
                 {

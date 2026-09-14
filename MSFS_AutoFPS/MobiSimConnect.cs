@@ -1,6 +1,7 @@
 ﻿using Microsoft.FlightSimulator.SimConnect;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
@@ -23,6 +24,9 @@ namespace MSFS_AutoFPS
         protected IntPtr simConnectHandle = IntPtr.Zero;
         protected Thread simConnectThread = null;
         private static bool cancelThread = false;
+        // Signaled by SimConnect itself when a message is ready, so the receive thread can block instead
+        // of waking up on a fixed 100ms cadence regardless of whether there is anything to do.
+        private readonly AutoResetEvent simConnectEventHandle = new AutoResetEvent(false);
 
         protected bool isSimConnected = false;
         protected bool isMobiConnected = false;
@@ -64,17 +68,19 @@ namespace MSFS_AutoFPS
                 if (isSimConnected)
                     return true;
                 
-                simConnect = new SimConnect(CLIENT_NAME, simConnectHandle, WM_PILOTSDECK_SIMCONNECT, null, 0);
+                // Passing IntPtr.Zero for hWnd plus a real WaitHandle puts SimConnect into "event" mode: it
+                // signals simConnectEventHandle whenever a message is waiting, instead of posting a window
+                // message that nothing here was ever pumping (the WM_PILOTSDECK_SIMCONNECT id was unused).
+                simConnect = new SimConnect(CLIENT_NAME, simConnectHandle, WM_PILOTSDECK_SIMCONNECT, simConnectEventHandle, 0);
                 simConnect.OnRecvOpen += new SimConnect.RecvOpenEventHandler(SimConnect_OnOpen);
                 simConnect.OnRecvQuit += new SimConnect.RecvQuitEventHandler(SimConnect_OnQuit);
                 simConnect.OnRecvException += new SimConnect.RecvExceptionEventHandler(SimConnect_OnException);
-                
+
                 cancelThread = false;
                 simConnectThread = new(new ThreadStart(SimConnect_ReceiveThread))
                 {
                     IsBackground = true
                 };
-                simConnectHandle = new IntPtr(simConnectThread.ManagedThreadId);
                 simConnectThread.Start();
 
                 Logger.Log(LogLevel.Information, "MobiSimConnect:Connect", $"SimConnect Connection open");
@@ -113,22 +119,27 @@ namespace MSFS_AutoFPS
 
         protected void SimConnect_ReceiveThread()
         {
-            ulong ticks = 0;
-            int delay = 100;
-            int repeat = 5000 / delay;
+            var pingStopwatch = Stopwatch.StartNew();
+            TimeSpan pingInterval = TimeSpan.FromSeconds(5);
+            int waitTimeoutMs = 1000;
             int errors = 0;
             isReceiveRunning = true;
             while (!cancelThread && simConnect != null && isReceiveRunning)
             {
                 try
                 {
-                    simConnect.ReceiveMessage();
+                    // Only call ReceiveMessage() when SimConnect actually signaled data is waiting; the
+                    // timeout just makes sure we still notice cancellation and can send the periodic ping
+                    // while waiting for the initial MobiFlight handshake.
+                    if (simConnectEventHandle.WaitOne(waitTimeoutMs))
+                        simConnect.ReceiveMessage();
 
-                    if (isSimConnected && !isMobiConnected && ticks % (ulong)repeat == 0)
+                    if (isSimConnected && !isMobiConnected && pingStopwatch.Elapsed >= pingInterval)
                     {
                         Logger.Log(LogLevel.Debug, "MobiSimConnect:SimConnect_ReceiveThread", $"Sending Ping to MobiFlight WASM Module");
                         SendMobiWasmCmd("MF.DummyCmd");
                         SendMobiWasmCmd("MF.Ping");
+                        pingStopwatch.Restart();
                     }
                 }
                 catch (Exception ex)
@@ -141,8 +152,6 @@ namespace MSFS_AutoFPS
                         return;
                     }
                 }
-                Thread.Sleep(delay);
-                ticks++;
             }
             isReceiveRunning = false;
             return;
@@ -256,6 +265,7 @@ namespace MSFS_AutoFPS
                //    SendClientWasmCmd("MF.SimVars.Clear");
 
                 cancelThread = true;
+                simConnectEventHandle.Set(); // wake the receive thread immediately instead of waiting out its poll timeout
                 //if (simConnectThread != null)
                 //{
                 //    simConnectThread.Interrupt();
@@ -330,6 +340,7 @@ namespace MSFS_AutoFPS
         public void Dispose()
         {
             Disconnect();
+            simConnectEventHandle.Dispose();
             GC.SuppressFinalize(this);
         }
 
@@ -445,6 +456,20 @@ namespace MSFS_AutoFPS
                 return value;
             else
                 return 0;
+        }
+
+        // Resolves a subscribed sim var to its index once, so a hot loop (e.g. LODController's per-second
+        // tick) can read it repeatedly via ReadSimVar(uint) without rebuilding/hashing the "(A:name, unit)"
+        // string and re-doing the dictionary lookup on every single read.
+        public uint GetSimVarIndex(string name, string unit)
+        {
+            string address = $"(A:{name}, {unit})";
+            return addressToIndex.TryGetValue(address, out uint index) ? index : uint.MaxValue;
+        }
+
+        public float ReadSimVar(uint index)
+        {
+            return simVars.TryGetValue(index, out float value) ? value : 0;
         }
 
         public void WriteLvar(string address, float value)

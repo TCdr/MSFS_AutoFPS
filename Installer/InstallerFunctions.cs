@@ -573,7 +573,14 @@ namespace Installer
             {
                 if (line.StartsWith(Parameters.msStringPackage))
                 {
-                    return line.Replace("\"", "").Substring(Parameters.msStringPackage.Length) + "\\Community";
+                    string rawPath = line.Replace("\"", "").Substring(Parameters.msStringPackage.Length).Trim().TrimEnd('\\', '/');
+                    // InstalledPackagesPath usually points at the packages root (Official/Community are
+                    // siblings under it), but on some installs it already includes "\Community" itself -
+                    // appending it unconditionally in that case produced a nonexistent
+                    // "...\Community\Community" path, silently breaking WASM-module detection/install.
+                    if (rawPath.EndsWith("\\Community", StringComparison.OrdinalIgnoreCase))
+                        return rawPath;
+                    return rawPath + "\\Community";
                 }
             }
 

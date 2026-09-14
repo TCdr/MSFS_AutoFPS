@@ -120,7 +120,7 @@ namespace MSFS_AutoFPS
             timer.Start();
 
             MainWindow = new MainWindow(notifyIcon.DataContext as NotifyIconViewModel, Model);
-            if (Model.OpenWindow && Model.windowIsVisible)
+            if (Model.Window.OpenWindow && Model.Window.windowIsVisible)
                 MainWindow.Show();
         }
 
@@ -132,36 +132,7 @@ namespace MSFS_AutoFPS
                 Thread.Sleep(Interval); // Ensure Runtick finishes its last MSFS settings changes
                 if (Model.DefaultSettingsRead && Model.IsSessionRunning)
                 {
-                    Logger.Log(LogLevel.Information, "App:OnExit", $"Resetting LODs to PC {Model.DefaultTLOD} / {Model.DefaultOLOD} and VR {Model.DefaultTLOD_VR} / {Model.DefaultOLOD_VR}");
-                    Model.MemoryAccess.SetTLOD_PC(Model.DefaultTLOD);
-                    Model.MemoryAccess.SetTLOD_VR(Model.DefaultTLOD_VR);
-                    Model.MemoryAccess.SetOLOD_PC(Model.DefaultOLOD);
-                    Model.MemoryAccess.SetOLOD_VR(Model.DefaultOLOD_VR);
-                    Logger.Log(LogLevel.Information, "App:OnExit", $"Resetting Cloud Quality to PC {ServiceModel.CloudQualityText(Model.DefaultCloudQ)}  / VR  {ServiceModel.CloudQualityText(Model.DefaultCloudQ_VR)}");
-                    Model.MemoryAccess.SetCloudQ(Model.DefaultCloudQ);
-                    Model.MemoryAccess.SetCloudQ_VR(Model.DefaultCloudQ_VR);
-                    if (Model.isMSFS2024)
-                    {
-                        Logger.Log(LogLevel.Information, "App:OnExit", $"Resetting Dynamic Settings to PC {Model.DefaultDynSet} / VR {Model.DefaultDynSetVR}");
-                        Model.MemoryAccess.SetDynSet(Model.DefaultDynSet);
-                        Model.MemoryAccess.SetDynSetVR(Model.DefaultDynSetVR);
-                    }
-                    if (Model.MemoryAccess.GetTLOD_PC() == Model.DefaultTLOD) // As long as one setting restoration stuck
-                    {
-                        Model.ConfigurationFile.RemoveSetting("defaultTLOD");
-                        Model.ConfigurationFile.RemoveSetting("defaultTLOD_VR");
-                        Model.ConfigurationFile.RemoveSetting("defaultOLOD");
-                        Model.ConfigurationFile.RemoveSetting("defaultOLOD_VR");
-                        Model.ConfigurationFile.RemoveSetting("defaultCloudQ");
-                        Model.ConfigurationFile.RemoveSetting("defaultCloudQ_VR");
-                        if (Model.isMSFS2024)
-                        {
-                            Model.ConfigurationFile.RemoveSetting("defaultDynSet");
-                            Model.ConfigurationFile.RemoveSetting("defaultDynSetVR");
-                        }
-                        Logger.Log(LogLevel.Information, "App:OnExit", "Default MSFS settings reset successful. Removed back up default MSFS settings from MSFS" + (Model.isMSFS2024 ? "2024" : "2020") + "_AutoFPS config file.");
-                    }
-                    else Logger.Log(LogLevel.Information, "App:OnExit", "Default MSFS settings reset failed. Retained back up default MSFS settings in MSFS" + (Model.isMSFS2024 ? "2024" : "2020") + "_AutoFPS config file.");
+                    Model.RestoreOriginalMSFSSettings("App:OnExit");
                 }
             }   
             notifyIcon?.Dispose();
@@ -172,7 +143,7 @@ namespace MSFS_AutoFPS
 
         protected void OnTick(object sender, EventArgs e)
         {
-            if ((MainWindow.Visibility == Visibility.Visible && !Model.windowIsVisible) || (MainWindow.Visibility == Visibility.Hidden && Model.windowIsVisible)) Model.SetSetting("windowIsVisible", Model.windowIsVisible ? "false" : "true");
+            if ((MainWindow.Visibility == Visibility.Visible && !Model.Window.windowIsVisible) || (MainWindow.Visibility == Visibility.Hidden && Model.Window.windowIsVisible)) Model.SetSetting("windowIsVisible", Model.Window.windowIsVisible ? "false" : "true");
             if (Model.ServiceExited)
             {
                 Current.Shutdown();

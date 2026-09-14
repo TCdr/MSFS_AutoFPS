@@ -176,38 +176,9 @@ namespace MSFS_AutoFPS
                 }
                 Logger.Log(LogLevel.Information, "ServiceController:ServiceLoop", "ServiceLoop ended");
 
-                if (true && IPCManager.IsSimRunning())
+                if (IPCManager.IsSimRunning())
                 {
-                    Logger.Log(LogLevel.Information, "ServiceController:ServiceLoop", $"Sim still running, resetting LODs to PC {Model.DefaultTLOD} / {Model.DefaultOLOD} and VR {Model.DefaultTLOD_VR} / {Model.DefaultOLOD_VR}");
-                    Model.MemoryAccess.SetTLOD_PC(Model.DefaultTLOD);
-                    Model.MemoryAccess.SetTLOD_VR(Model.DefaultTLOD_VR);
-                    Model.MemoryAccess.SetOLOD_PC(Model.DefaultOLOD);
-                    Model.MemoryAccess.SetOLOD_VR(Model.DefaultOLOD_VR);
-                    Logger.Log(LogLevel.Information, "ServiceController:ServiceLoop", $"Sim still running, resetting Cloud Quality to PC {ServiceModel.CloudQualityText(Model.DefaultCloudQ)} / VR {ServiceModel.CloudQualityText(Model.DefaultCloudQ_VR)}");
-                    Model.MemoryAccess.SetCloudQ(Model.DefaultCloudQ);
-                    Model.MemoryAccess.SetCloudQ_VR(Model.DefaultCloudQ_VR);
-                    if (Model.isMSFS2024)
-                    {
-                        Logger.Log(LogLevel.Information, "ServiceController:ServiceLoop", $"Sim still running, resetting Dynamic Settings to PC {Model.DefaultDynSet} / VR {Model.DefaultDynSetVR}");
-                        Model.MemoryAccess.SetDynSet(Model.DefaultDynSet);
-                        Model.MemoryAccess.SetDynSetVR(Model.DefaultDynSetVR);
-                    }
-                    if (Model.MemoryAccess.GetTLOD_PC() == Model.DefaultTLOD) // As long as one setting restoration stuck
-                    {
-                        Model.ConfigurationFile.RemoveSetting("defaultTLOD");
-                        Model.ConfigurationFile.RemoveSetting("defaultTLOD_VR");
-                        Model.ConfigurationFile.RemoveSetting("defaultOLOD");
-                        Model.ConfigurationFile.RemoveSetting("defaultOLOD_VR");
-                        Model.ConfigurationFile.RemoveSetting("defaultCloudQ");
-                        Model.ConfigurationFile.RemoveSetting("defaultCloudQ_VR");
-                        if (Model.isMSFS2024)
-                        {
-                            Model.ConfigurationFile.RemoveSetting("defaultDynSet");
-                            Model.ConfigurationFile.RemoveSetting("defaultDynSetVR");
-                        }
-                        Logger.Log(LogLevel.Information, "ServiceController:ServiceLoop", "Default MSFS settings reset successful. Removed back up default MSFS settings from MSFS" + (Model.isMSFS2024 ? "2024" : "2020") + "_AutoFPS config file.");
-                    }
-                    else Logger.Log(LogLevel.Information, "ServiceController:ServiceLoop", "Default MSFS settings reset failed. Retained back up default MSFS settings in MSFS" + (Model.isMSFS2024 ? "2024" : "2020") + "_AutoFPS config file.");
+                    Model.RestoreOriginalMSFSSettings("ServiceController:ServiceLoop");
                 }
             }
             else Model.AppEnabled = false;

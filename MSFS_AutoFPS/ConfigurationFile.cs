@@ -11,6 +11,7 @@ namespace MSFS_AutoFPS
         private XmlDocument xmlDoc = new();
         private string ConfigFile = App.ConfigFile;
         private string ConfigFileLast = App.ConfigFile;
+        private bool isLoaded = false;
 
         public string this[string key]
         {
@@ -20,7 +21,18 @@ namespace MSFS_AutoFPS
 
         public bool LoadConfiguration(bool isSim2024)
         {
-            ConfigFile = isSim2024 ? App.ConfigFile2024 : App.ConfigFile;
+            string targetConfigFile = isSim2024 ? App.ConfigFile2024 : App.ConfigFile;
+
+            // This class is the only writer of the config file (SetSetting/SaveConfiguration keep
+            // appSettings and disk in sync), so re-reading and re-parsing the whole XML document from disk
+            // only actually needs to happen once, or when switching between the MSFS2020/2024 config
+            // files. Every other caller - notably the reload that used to run after every single UI
+            // setting change - was redoing this full round-trip for a file whose in-memory copy was
+            // already correct and current.
+            if (isLoaded && targetConfigFile == ConfigFile)
+                return false;
+
+            ConfigFile = targetConfigFile;
             xmlDoc = new();
             xmlDoc.LoadXml(File.ReadAllText(ConfigFile));
 
@@ -28,6 +40,7 @@ namespace MSFS_AutoFPS
             appSettings.Clear();
             foreach(XmlNode child in xmlSettings.ChildNodes)
                 appSettings.Add(child.Attributes["key"].Value, child.Attributes["value"].Value);
+            isLoaded = true;
             if (ConfigFile != ConfigFileLast)
             {
                 ConfigFileLast = ConfigFile;
@@ -88,8 +101,9 @@ namespace MSFS_AutoFPS
         }
         public void SetSetting(string key, string value)
         {
-            if (appSettings.ContainsKey(key))
+            if (appSettings.TryGetValue(key, out string existing))
             {
+                if (existing == value) return; // unchanged - skip rewriting the whole XML file to disk
                 appSettings[key] = value;
                 SaveConfiguration();
             }

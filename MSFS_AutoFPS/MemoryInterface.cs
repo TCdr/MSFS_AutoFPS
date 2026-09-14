@@ -53,12 +53,29 @@ namespace MSFS_AutoFPS
             return false;
         }
 
-        public static void WriteMemory<T>(long Address, object Value)
+        // Was previously WriteMemory<T>(long, object): T was never actually used to determine how many
+        // bytes got written - Marshal.SizeOf(obj) sized the buffer off the boxed argument's runtime type
+        // instead. That silently wrote 4 bytes (the default marshaled size of a boxed bool) for the two
+        // call sites passing a bool into WriteMemory<byte>, clobbering 3 bytes past the intended 1-byte
+        // MSFS field. Making T the actual parameter type fixes that and lets the size be cached per T
+        // instead of resolved via reflection on every single call.
+        public static void WriteMemory<T>(long Address, T Value) where T : struct
         {
             try
             {
-                var buffer = StructureToByteArray(Value);
-                NativeMethods.NtWriteVirtualMemory(checked((int)procHandle), Address, buffer, buffer.Length, out _);
+                int size = SizeCache<T>.Size;
+                IntPtr pointer = Marshal.AllocHGlobal(size);
+                try
+                {
+                    Marshal.StructureToPtr(Value, pointer, false);
+                    var buffer = new byte[size];
+                    Marshal.Copy(pointer, buffer, 0, size);
+                    NativeMethods.NtWriteVirtualMemory(procHandle, Address, buffer, buffer.Length, out _);
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(pointer);
+                }
             }
             catch (Exception ex)
             {
@@ -70,11 +87,9 @@ namespace MSFS_AutoFPS
         {
             try
             {
-                var ByteSize = Marshal.SizeOf(typeof(T));
+                var buffer = new byte[SizeCache<T>.Size];
 
-                var buffer = new byte[ByteSize];
-
-                NativeMethods.NtReadVirtualMemory(checked((int)procHandle), address, buffer, buffer.Length, out _);
+                NativeMethods.NtReadVirtualMemory(procHandle, address, buffer, buffer.Length, out _);
 
                 return ByteArrayToStructure<T>(buffer);
             }
@@ -99,19 +114,12 @@ namespace MSFS_AutoFPS
             }
         }
 
-        private static byte[] StructureToByteArray(object obj)
+        // Marshal.SizeOf(typeof(T)) involves a reflection lookup; caching it in a generic static field
+        // resolves it exactly once per closed type (float/int/byte/long) instead of on every read/write -
+        // and this class does a dozen+ reads per LODController tick.
+        private static class SizeCache<T> where T : struct
         {
-            var length = Marshal.SizeOf(obj);
-
-            var array = new byte[length];
-
-            var pointer = Marshal.AllocHGlobal(length);
-
-            Marshal.StructureToPtr(obj, pointer, true);
-            Marshal.Copy(pointer, array, 0, length);
-            Marshal.FreeHGlobal(pointer);
-
-            return array;
+            public static readonly int Size = Marshal.SizeOf<T>();
         }
     }
 
@@ -120,9 +128,12 @@ namespace MSFS_AutoFPS
         [DllImport("kernel32.dll")]
         internal static extern IntPtr OpenProcess(int dwDesiredAccess, bool bInheritHandle, int dwProcessId);
 
+        // ProcessHandle is a Windows HANDLE (pointer-sized) - was previously declared as `int` here and
+        // truncated into one via a `checked` cast at the call site, which would throw if a handle value
+        // ever exceeded Int32 range instead of just working like a real HANDLE parameter should.
         [DllImport("ntdll.dll")]
-        internal static extern IntPtr NtWriteVirtualMemory(int ProcessHandle, long BaseAddress, byte[] Buffer, int NumberOfBytesToWrite, out int NumberOfBytesWritten);
+        internal static extern IntPtr NtWriteVirtualMemory(IntPtr ProcessHandle, long BaseAddress, byte[] Buffer, int NumberOfBytesToWrite, out int NumberOfBytesWritten);
         [DllImport("ntdll.dll")]
-        internal static extern bool NtReadVirtualMemory(int ProcessHandle, long BaseAddress, byte[] Buffer, int NumberOfBytesToRead, out int NumberOfBytesRead);
+        internal static extern bool NtReadVirtualMemory(IntPtr ProcessHandle, long BaseAddress, byte[] Buffer, int NumberOfBytesToRead, out int NumberOfBytesRead);
     }
 }

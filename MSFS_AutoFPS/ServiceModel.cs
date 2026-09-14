@@ -134,33 +134,20 @@ namespace MSFS_AutoFPS
         public string LogLevel { get; set; }
         public static int MfLvarsPerFrame { get; set; }
         public bool WaitForConnect { get; set; }
-        public bool OpenWindow { get; set; }
-        public int windowTop {  get; set; }
-        public int windowLeft { get; set; }
-        public bool windowIsVisible { get; set; }
-        public bool RememberWindowPos { get; set; }
-        public int windowPanelState { get; set; } = 0;
+
+        // Window position/visibility/on-top state - read and written only by MainWindow and App, never by
+        // the live control loop (LODController/MemoryManager/ServiceController). Grouped separately from
+        // ServiceModel's other ~80 flat properties so that boundary is visible in the code, not just in
+        // practice.
+        public WindowSettings Window { get; } = new();
 
         private bool resetWindowPosition;
 
-        public bool OnTop { get; set; }
-        public string SimModule { get; set; }
-        public long OffsetModuleBase { get; set; }
-        public long OffsetPointerMain { get; set; }
-        public long OffsetPointerTlod { get; set; }
-        public long OffsetPointerTlodVr { get; set; }
-        public long OffsetPointerOlod { get; set; }
-        public long OffsetPointerOlodVr { get; set; }
-        public long OffsetPointerCloudQ { get; set; }
-        public long OffsetPointerCloudQVr { get; set; }
-        public long OffsetPointerVrMode { get; set; }
-        public long OffsetPointerFgMode { get; set; }
-        public long OffsetPointerAnsio { get; set; }
-        public long OffsetPointerDynSet { get; set; }
-        public long OffsetPointerDynSetVr { get; set; }
-        public long OffsetPointerCubeMap { get; set; }
-        public long OffsetPointerWaterWaves { get; set; }
-        public bool OffsetSearchingActive { get; set; }
+        // Everything MemoryManager needs to attach to MSFS and locate its TLOD/OLOD/cloud/VR/FG/DynSet
+        // memory - only consumed by MemoryManager (as inert data - grouping it doesn't change how any of
+        // it is computed or used) and, for the "search in progress" flag, displayed as a status message by
+        // MainWindow. Never touched by LODController or the rest of the control loop.
+        public MemoryOffsets Offsets { get; } = new();
         public bool SimPaused { get; set; } = false;
         public bool AppPaused { get; set; } = false;
 
@@ -218,21 +205,21 @@ namespace MSFS_AutoFPS
             LogLevel = Convert.ToString(ConfigurationFile.GetSetting("logLevel", "Debug"));
             MfLvarsPerFrame = Convert.ToInt32(ConfigurationFile.GetSetting("mfLvarPerFrame", "15"));
             ConfigVersion = Convert.ToInt32(ConfigurationFile.GetSetting("ConfigVersion", "1"));
-            OpenWindow = Convert.ToBoolean(ConfigurationFile.GetSetting("openWindow", "true"));
-            RememberWindowPos = Convert.ToBoolean(ConfigurationFile.GetSetting("RememberWindowPos", "true"));
+            Window.OpenWindow = Convert.ToBoolean(ConfigurationFile.GetSetting("openWindow", "true"));
+            Window.RememberWindowPos = Convert.ToBoolean(ConfigurationFile.GetSetting("RememberWindowPos", "true"));
             if (resetWindowPosition)
             {
                 SetSetting("windowTop", "50", true);
                 SetSetting("windowLeft", "50", true);
                 resetWindowPosition = false;
             }
-            windowTop = Convert.ToInt32(ConfigurationFile.GetSetting("windowTop", "50"));
-            windowLeft = Convert.ToInt32(ConfigurationFile.GetSetting("windowLeft", "50"));
-            windowIsVisible = Convert.ToBoolean(ConfigurationFile.GetSetting("windowIsVisible", "true"));
-            windowPanelState = Convert.ToInt32(ConfigurationFile.GetSetting("windowPanelState", "0"));
+            Window.windowTop = Convert.ToInt32(ConfigurationFile.GetSetting("windowTop", "50"));
+            Window.windowLeft = Convert.ToInt32(ConfigurationFile.GetSetting("windowLeft", "50"));
+            Window.windowIsVisible = Convert.ToBoolean(ConfigurationFile.GetSetting("windowIsVisible", "true"));
+            Window.windowPanelState = Convert.ToInt32(ConfigurationFile.GetSetting("windowPanelState", "0"));
             WaitForConnect = Convert.ToBoolean(ConfigurationFile.GetSetting("waitForConnect", "true"));
             FlightTypeIFR = Convert.ToBoolean(ConfigurationFile.GetSetting("FlightTypeIFR", "true"));
-            SimModule = Convert.ToString(ConfigurationFile.GetSetting("simModule", "WwiseLibPCx64P.dll"));
+            Offsets.SimModule = Convert.ToString(ConfigurationFile.GetSetting("simModule", "WwiseLibPCx64P.dll"));
             UseExpertOptions = Convert.ToBoolean(ConfigurationFile.GetSetting("useExpertOptions", "false"));
             LogSimValues = Convert.ToBoolean(ConfigurationFile.GetSetting("LogSimValues", "false"));
             AutoTargetFPS = Convert.ToBoolean(ConfigurationFile.GetSetting("AutoTargetFPS", "false"));
@@ -251,7 +238,7 @@ namespace MSFS_AutoFPS
                 MinTLODExtra[(int)appProfiles.VFR_Expert] = Convert.ToBoolean(ConfigurationFile.GetSetting("MinTLODExtra_VFR", MinTLODExtra[(int)appProfiles.IFR_Expert].ToString()));
                 MinTLODExtra[(int)appProfiles.NonExpert] = true;
             }
-            OnTop = Convert.ToBoolean(ConfigurationFile.GetSetting("OnTop", "false"));
+            Window.OnTop = Convert.ToBoolean(ConfigurationFile.GetSetting("OnTop", "false"));
             PauseMSFSFocusLost = Convert.ToBoolean(ConfigurationFile.GetSetting("PauseMSFSFocusLost", "false"));
             TargetFPS_PC = Convert.ToInt32(ConfigurationFile.GetSetting("targetFpsPC", "40"));
             TargetFPS_VR = Convert.ToInt32(ConfigurationFile.GetSetting("targetFpsVR", "40"));
@@ -268,26 +255,26 @@ namespace MSFS_AutoFPS
                 else if (ActiveGraphicsMode == "LS") TargetFPS = FlightTypeIFR ? TargetFPS_LS : TargetFPS_LS_VFR;
                 else TargetFPS = FlightTypeIFR ? TargetFPS_PC : TargetFPS_PC_VFR;
             }
-            OffsetModuleBase = Convert.ToInt64(ConfigurationFile.GetSetting("offsetModuleBase", isMSFS2024 ? (File.Exists(App.msConfigSteam2024) ? "0x0A241C60" : "0x09F0DC40") : "0x004B2368"), 16);
-            OffsetPointerTlod = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerTlod", isMSFS2024 ? "0x358" : "0xC"), 16);
-            OffsetPointerTlodVr = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerTlodVr", isMSFS2024 ? "0x480" : "0x114"), 16);
-            OffsetPointerOlod = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerOlod", isMSFS2024 ? "0x36C" : "0xC"), 16);
-            OffsetPointerCloudQ = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerCloudQ", isMSFS2024 ? "0x3A4" : "0x44"), 16);
-            OffsetPointerCloudQVr = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerCloudQVr", isMSFS2024 ? "0x4CC" : "0x108"), 16);
-            OffsetPointerVrMode = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerVrMode", isMSFS2024 ? "0x334" : "0x1C"), 16);
-            OffsetPointerFgMode = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerFgMode", isMSFS2024 ? "0x304" : "0x4A"), 16);
-            OffsetPointerAnsio = -Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerAnsio", (isMSFS2024 ? "0x20" : "0x18")), 16);
+            Offsets.OffsetModuleBase = Convert.ToInt64(ConfigurationFile.GetSetting("offsetModuleBase", isMSFS2024 ? (File.Exists(App.msConfigSteam2024) ? "0x0A241C60" : "0x09F0DC40") : "0x004B2368"), 16);
+            Offsets.OffsetPointerTlod = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerTlod", isMSFS2024 ? "0x358" : "0xC"), 16);
+            Offsets.OffsetPointerTlodVr = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerTlodVr", isMSFS2024 ? "0x480" : "0x114"), 16);
+            Offsets.OffsetPointerOlod = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerOlod", isMSFS2024 ? "0x36C" : "0xC"), 16);
+            Offsets.OffsetPointerCloudQ = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerCloudQ", isMSFS2024 ? "0x3A4" : "0x44"), 16);
+            Offsets.OffsetPointerCloudQVr = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerCloudQVr", isMSFS2024 ? "0x4CC" : "0x108"), 16);
+            Offsets.OffsetPointerVrMode = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerVrMode", isMSFS2024 ? "0x334" : "0x1C"), 16);
+            Offsets.OffsetPointerFgMode = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerFgMode", isMSFS2024 ? "0x304" : "0x4A"), 16);
+            Offsets.OffsetPointerAnsio = -Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerAnsio", (isMSFS2024 ? "0x20" : "0x18")), 16);
             if (isMSFS2024)
             {
-                OffsetPointerOlodVr = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerOlodVR", "0x494"), 16);
-                OffsetPointerDynSet = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerDynSet", "0x328"), 16);
-                OffsetPointerDynSetVr = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerDynSetVR", "0x329"), 16);
-                OffsetPointerCubeMap = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerCubeMap", "0x6C"), 16);
+                Offsets.OffsetPointerOlodVr = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerOlodVR", "0x494"), 16);
+                Offsets.OffsetPointerDynSet = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerDynSet", "0x328"), 16);
+                Offsets.OffsetPointerDynSetVr = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerDynSetVR", "0x329"), 16);
+                Offsets.OffsetPointerCubeMap = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerCubeMap", "0x6C"), 16);
             }
             else
             {
-                OffsetPointerMain = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerMain", "0x3D0"), 16);
-                OffsetPointerWaterWaves = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerWaterWaves", "0x3C"), 16);
+                Offsets.OffsetPointerMain = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerMain", "0x3D0"), 16);
+                Offsets.OffsetPointerWaterWaves = Convert.ToInt64(ConfigurationFile.GetSetting("offsetPointerWaterWaves", "0x3C"), 16);
             }
             SimMinLOD = Convert.ToSingle(ConfigurationFile.GetSetting("simMinLod", "10"), new RealInvariantFormat(ConfigurationFile.GetSetting("simMinLod", "10")));
             DecCloudQNonExpert = Convert.ToBoolean(ConfigurationFile.GetSetting("DecCloudQNonExpert", "true"));
@@ -459,6 +446,49 @@ namespace MSFS_AutoFPS
                 }
             }
         }
+        // Writes the original (pre-app) TLOD/OLOD/cloud/dynamic-settings values back to MSFS and, if the
+        // restoration verifiably took, removes the "default*" backup keys from the config file. This was
+        // previously duplicated near-verbatim in both App.OnExit (normal shutdown) and
+        // ServiceController.ServiceLoop (session end while the app keeps running for the next session) -
+        // the two copies could only drift out of sync from here.
+        public bool RestoreOriginalMSFSSettings(string logContext)
+        {
+            Logger.Log(MSFS_AutoFPS.LogLevel.Information, logContext, $"Resetting LODs to PC {DefaultTLOD} / {DefaultOLOD} and VR {DefaultTLOD_VR} / {DefaultOLOD_VR}");
+            MemoryAccess.SetTLOD_PC(DefaultTLOD);
+            MemoryAccess.SetTLOD_VR(DefaultTLOD_VR);
+            MemoryAccess.SetOLOD_PC(DefaultOLOD);
+            MemoryAccess.SetOLOD_VR(DefaultOLOD_VR);
+            Logger.Log(MSFS_AutoFPS.LogLevel.Information, logContext, $"Resetting Cloud Quality to PC {CloudQualityText(DefaultCloudQ)} / VR {CloudQualityText(DefaultCloudQ_VR)}");
+            MemoryAccess.SetCloudQ(DefaultCloudQ);
+            MemoryAccess.SetCloudQ_VR(DefaultCloudQ_VR);
+            if (isMSFS2024)
+            {
+                Logger.Log(MSFS_AutoFPS.LogLevel.Information, logContext, $"Resetting Dynamic Settings to PC {DefaultDynSet} / VR {DefaultDynSetVR}");
+                MemoryAccess.SetDynSet(DefaultDynSet);
+                MemoryAccess.SetDynSetVR(DefaultDynSetVR);
+            }
+
+            bool restored = MemoryAccess.GetTLOD_PC() == DefaultTLOD; // As long as one setting restoration stuck
+            if (restored)
+            {
+                ConfigurationFile.RemoveSetting("defaultTLOD");
+                ConfigurationFile.RemoveSetting("defaultTLOD_VR");
+                ConfigurationFile.RemoveSetting("defaultOLOD");
+                ConfigurationFile.RemoveSetting("defaultOLOD_VR");
+                ConfigurationFile.RemoveSetting("defaultCloudQ");
+                ConfigurationFile.RemoveSetting("defaultCloudQ_VR");
+                if (isMSFS2024)
+                {
+                    ConfigurationFile.RemoveSetting("defaultDynSet");
+                    ConfigurationFile.RemoveSetting("defaultDynSetVR");
+                }
+                Logger.Log(MSFS_AutoFPS.LogLevel.Information, logContext, "Default MSFS settings reset successful. Removed back up default MSFS settings from MSFS" + (isMSFS2024 ? "2024" : "2020") + "_AutoFPS config file.");
+            }
+            else Logger.Log(MSFS_AutoFPS.LogLevel.Information, logContext, "Default MSFS settings reset failed. Retained back up default MSFS settings in MSFS" + (isMSFS2024 ? "2024" : "2020") + "_AutoFPS config file.");
+
+            return restored;
+        }
+
         public static string CloudQualityText(int CloudQuality)
         {
             if (CloudQuality == 0) return "Low";
@@ -467,5 +497,37 @@ namespace MSFS_AutoFPS
             else if (CloudQuality == 3) return "Ultra";
             else return "n/a";
         }
+    }
+
+    public class WindowSettings
+    {
+        public bool OpenWindow { get; set; }
+        public int windowTop { get; set; }
+        public int windowLeft { get; set; }
+        public bool windowIsVisible { get; set; }
+        public bool RememberWindowPos { get; set; }
+        public int windowPanelState { get; set; } = 0;
+        public bool OnTop { get; set; }
+    }
+
+    public class MemoryOffsets
+    {
+        public string SimModule { get; set; }
+        public long OffsetModuleBase { get; set; }
+        public long OffsetPointerMain { get; set; }
+        public long OffsetPointerTlod { get; set; }
+        public long OffsetPointerTlodVr { get; set; }
+        public long OffsetPointerOlod { get; set; }
+        public long OffsetPointerOlodVr { get; set; }
+        public long OffsetPointerCloudQ { get; set; }
+        public long OffsetPointerCloudQVr { get; set; }
+        public long OffsetPointerVrMode { get; set; }
+        public long OffsetPointerFgMode { get; set; }
+        public long OffsetPointerAnsio { get; set; }
+        public long OffsetPointerDynSet { get; set; }
+        public long OffsetPointerDynSetVr { get; set; }
+        public long OffsetPointerCubeMap { get; set; }
+        public long OffsetPointerWaterWaves { get; set; }
+        public bool OffsetSearchingActive { get; set; }
     }
 }

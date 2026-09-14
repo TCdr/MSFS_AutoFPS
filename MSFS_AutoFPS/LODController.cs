@@ -76,6 +76,18 @@ namespace MSFS_AutoFPS
         GpuzWrapper gpuz = new GpuzWrapper();
         int gpuzGPULoadSensorIndex = -1;
 
+        // Cached sim var indices - see comment in the constructor.
+        private uint idxVerticalSpeed;
+        private uint idxAltAboveGround;
+        private uint idxAltAboveGroundMinusCG;
+        private uint idxSimOnGround;
+        private uint idxGroundVelocity;
+        private uint idxPlaneAltitude;
+        private uint idxAccelerationBodyZ;
+        private uint idxThrottlePosition;
+        private uint idxGlasscockpitBrightness;
+        private uint idxCameraState;
+
         public LODController(ServiceModel model)
         {
             Model = model;
@@ -90,6 +102,21 @@ namespace MSFS_AutoFPS
             SimConnect.SubscribeSimVar("ACCELERATION BODY Z", "feet per second squared");
             SimConnect.SubscribeSimVar("GENERAL ENG THROTTLE LEVER POSITION:1", "percent");
             SimConnect.SubscribeSimVar("GLASSCOCKPIT AUTOMATIC BRIGHTNESS", "percent");
+
+            // Resolve each sim var's index once so the once-a-second UpdateVariables() tick can read them
+            // without rebuilding an "(A:name, unit)" string and hashing it on every single read.
+            idxVerticalSpeed = SimConnect.GetSimVarIndex("VERTICAL SPEED", "feet per second");
+            idxAltAboveGround = SimConnect.GetSimVarIndex("PLANE ALT ABOVE GROUND", "feet");
+            idxAltAboveGroundMinusCG = SimConnect.GetSimVarIndex("PLANE ALT ABOVE GROUND MINUS CG", "feet");
+            idxSimOnGround = SimConnect.GetSimVarIndex("SIM ON GROUND", "Bool");
+            idxGroundVelocity = SimConnect.GetSimVarIndex("GROUND VELOCITY", "knots");
+            idxPlaneAltitude = SimConnect.GetSimVarIndex("PLANE ALTITUDE", "feet");
+            idxAccelerationBodyZ = SimConnect.GetSimVarIndex("ACCELERATION BODY Z", "feet per second squared");
+            idxThrottlePosition = SimConnect.GetSimVarIndex("GENERAL ENG THROTTLE LEVER POSITION:1", "percent");
+            idxGlasscockpitBrightness = SimConnect.GetSimVarIndex("GLASSCOCKPIT AUTOMATIC BRIGHTNESS", "percent");
+            // Subscribed by IPCManager during session-ready wait, before this controller is constructed.
+            idxCameraState = SimConnect.GetSimVarIndex("CAMERA STATE", "Enum");
+
             GetMSFSState();
             if (!gpuzRunning())
             {
@@ -101,8 +128,8 @@ namespace MSFS_AutoFPS
 
     private void UpdateVariables()
         {
-            vs = SimConnect.ReadSimVar("VERTICAL SPEED", "feet per second");
-            Model.OnGround = SimConnect.ReadSimVar("SIM ON GROUND", "Bool") == 1.0f;
+            vs = SimConnect.ReadSimVar(idxVerticalSpeed);
+            Model.OnGround = SimConnect.ReadSimVar(idxSimOnGround) == 1.0f;
             verticalStatsVS[verticalIndex] = vs;
             if (vs >= 8.0f)
                 verticalStats[verticalIndex] = 1;
@@ -116,15 +143,15 @@ namespace MSFS_AutoFPS
 
             Model.VerticalTrend = VerticalAverage();
 
-            Model.altAboveGnd = SimConnect.ReadSimVar("PLANE ALT ABOVE GROUND", "feet");
+            Model.altAboveGnd = SimConnect.ReadSimVar(idxAltAboveGround);
             if (Model.altAboveGnd == 0 && !Model.OnGround)
-                Model.altAboveGnd = SimConnect.ReadSimVar("PLANE ALT ABOVE GROUND MINUS CG", "feet");
+                Model.altAboveGnd = SimConnect.ReadSimVar(idxAltAboveGroundMinusCG);
 
-            Model.groundSpeed = SimConnect.ReadSimVar("GROUND VELOCITY", "knots");
-            Model.altitude = SimConnect.ReadSimVar("PLANE ALTITUDE", "feet");
-            longitudinalAccel = SimConnect.ReadSimVar("ACCELERATION BODY Z", "feet per second squared");
-            throttlePosition = SimConnect.ReadSimVar("GENERAL ENG THROTTLE LEVER POSITION:1", "percent");
-            if (SimConnect.ReadSimVar("GLASSCOCKPIT AUTOMATIC BRIGHTNESS", "percent") > 25) Model.NightTime = false;
+            Model.groundSpeed = SimConnect.ReadSimVar(idxGroundVelocity);
+            Model.altitude = SimConnect.ReadSimVar(idxPlaneAltitude);
+            longitudinalAccel = SimConnect.ReadSimVar(idxAccelerationBodyZ);
+            throttlePosition = SimConnect.ReadSimVar(idxThrottlePosition);
+            if (SimConnect.ReadSimVar(idxGlasscockpitBrightness) > 25) Model.NightTime = false;
             else Model.NightTime = true;
 
             GetMSFSState();
@@ -142,7 +169,7 @@ namespace MSFS_AutoFPS
             else Model.AppPaused = false;
 
             deltaFPSTrendMin = (Model.VrModeActive ? 1.0f : (Model.LsModeEnabled ? Model.LsModeMultiplier : (Model.FgModeEnabled && Model.ActiveWindowMSFS ? 2.0f : 1.0f))) * -Model.MinTLODFPSDropAmount;
-            if (SimConnect.ReadSimVar("CAMERA STATE", "Enum") == 3) deltaFPSTrendMin -= 1.0f;
+            if (SimConnect.ReadSimVar(idxCameraState) == 3) deltaFPSTrendMin -= 1.0f;
 
             SetActiveLODs();
 
@@ -168,6 +195,77 @@ namespace MSFS_AutoFPS
             deltaFPSTrendShort[deltaFPSTrendShortIndex] = (float)deltaFPS;
             if (++deltaFPSTrendShortIndex >= deltaFPSTrendShort.Length) deltaFPSTrendShortIndex = 0;
 
+            UpdateAutoTargetFPSFlightPhase();
+            UpdateMinTLODExtraPreTakeoffTracking();
+            UpdateFPSSettleStateMachine(deltaFPS);
+
+            if (!Model.AppPaused && (!Model.FPSSettleActive || (Model.TLODAutoMethod[Model.activeProfile] == 2) && !Model.MinTLODExtra[Model.activeProfile]))
+            {
+                float FPSToleranceAmount = Model.TargetFPS * Model.FPSTolerance[Model.activeProfile] / 100.0f;
+                FPSToleranceExceeded = Math.Abs(deltaFPS) >= FPSToleranceAmount;
+
+                deltaFPS = ApplyAutoTargetFPSRecalibration(deltaFPS);
+
+                if (Model.TLODAutoMethod[Model.activeProfile] == 2)
+                {
+                    ComputeAutoTLOD(deltaFPS);
+                }
+                else if (Model.MinTLODExtra[Model.activeProfile] && Model.MinTLODExtraActive && !Model.IsAppPriorityFPS && !(Model.FgModeEnabled && !Model.ActiveWindowMSFS) && (Model.DecCloudQMethod[Model.activeProfile] == 1 || !Model.DecCloudQActive) && Math.Round(Model.tlod) == Model.activeMinTLOD && deltaFPS <= -FPSToleranceAmount && Model.MinTLODExtraAmount > 0)
+                {
+                    ReduceMinTLODExtraForLowFPS();
+                }
+                else if (Model.MinTLODExtra[Model.activeProfile] && !Model.MinTLODExtraActive && !Model.IsAppPriorityFPS && !(Model.FgModeEnabled && !Model.ActiveWindowMSFS) && (Model.DecCloudQMethod[Model.activeProfile] == 1 || !Model.DecCloudQActive) && Model.MinTLODExtraIterations > 1 && deltaFPS >= Model.TargetFPS * MinTLODExtraActiveTolerance && Math.Ceiling(Model.tlod) < Model.activeMaxTLOD)
+                {
+                    IncreaseMinTLODExtraForHighFPS(deltaFPS);
+                }
+                else
+                {
+                    ComputeFPSBasedTLOD(deltaFPS, FPSToleranceAmount);
+                }
+                newTLOD = (float)Math.Round(Math.Min(Model.activeMaxTLOD, Math.Max(Model.activeMinTLOD, newTLOD)));
+
+                if (Math.Abs(Model.tlod - newTLOD) >= 1)
+                {
+                    Model.MemoryAccess.SetTLOD(Model.tlod = newTLOD);
+                    Model.tlod_step = true;
+                }
+                else Model.tlod_step = false;
+
+                UpdateCloudQuality(deltaFPS, FPSToleranceAmount, newTLOD);
+                UpdateOLOD();
+            }
+
+            Model.rangeMinTLOD = Model.activeMinTLOD;
+            if (Model.altAboveGnd >= AltTLODBase + TLODMinAltBand || Model.TLODAutoMethod[Model.activeProfile] == 2)
+            {
+                Model.IsAppPriorityFPS = true;
+                Model.rangeMaxTLOD = Model.activeMaxTLOD;
+            }
+            else
+            {
+                Model.IsAppPriorityFPS = false;
+                if (Model.altAboveGnd >= AltTLODBase) Model.rangeMaxTLOD = (float)Math.Round(Math.Min(Model.activeMinTLOD + (Model.activeMaxTLOD - Model.activeMinTLOD) * (Model.altAboveGnd - AltTLODBase) / TLODMinAltBand, Model.activeMaxTLOD) / 10) * 10;
+                else Model.rangeMaxTLOD = Model.activeMinTLOD;
+            }
+
+            TotalTicks++;
+            altAboveGndLast = Model.altAboveGnd;
+            groundSpeedLast = Model.groundSpeed;
+            NightTimeLast = Model.NightTime;
+        }
+
+        // The methods below were split out of what used to be one ~300-line RunTick() body, each a verbatim
+        // (statement-for-statement, same order) extraction of one self-contained section - no logic
+        // changed. This includes the core FPS/TLOD-seeking heuristic (ApplyAutoTargetFPSRecalibration,
+        // ComputeAutoTLOD, ReduceMinTLODExtraForLowFPS, IncreaseMinTLODExtraForHighFPS,
+        // ComputeFPSBasedTLOD): each is one branch of what was an if/else-if/else chain in RunTick,
+        // extracted with the dispatch conditions left in RunTick exactly as they were (mutual exclusivity
+        // is unchanged) and `newTLOD`/`FPSToleranceExceeded` still shared instance fields rather than
+        // parameters, since threading them through method signatures would risk a copy/paste slip in the
+        // one piece of this codebase most sensitive to a wrong value making it into a live flight.
+
+        private void UpdateAutoTargetFPSFlightPhase()
+        {
             if (Model.AutoTargetFPS)
             {
                 if (Model.OnGround && Model.groundSpeed == 0 && AutoFPSInFlightPhase)
@@ -178,7 +276,10 @@ namespace MSFS_AutoFPS
                 }
                 else if (Model.altAboveGnd >= AltTLODBase) AutoFPSInFlightPhase = true;
             }
+        }
 
+        private void UpdateMinTLODExtraPreTakeoffTracking()
+        {
             if (Model.MinTLODExtra[Model.activeProfile])
             {
                 if (Model.TLODAutoMethod[Model.activeProfile] == 2 && !Model.NightTime && !Model.NightTimeTransiton)
@@ -212,7 +313,10 @@ namespace MSFS_AutoFPS
                 }
                 else if (Model.altAboveGnd >= AltTLODBase) MinTLODExtraInFlightPhase = true;
             }
+        }
 
+        private void UpdateFPSSettleStateMachine(float deltaFPS)
+        {
             if (Model.FPSSettleActive && !Model.SimPaused)
             {
                 if (!Model.FPSSettleActiveLast)
@@ -244,7 +348,7 @@ namespace MSFS_AutoFPS
                         }
                     }
                     else if (deltaFPSTrendIndex >= 1)
-                     { 
+                     {
                         if (deltaFPSLowest > deltaFPS) deltaFPSLowest = deltaFPS;
                         else if (deltaFPSHighest < deltaFPS + 0.5) deltaFPSHighest = deltaFPS;
                         else Model.FPSSettleActive = false;
@@ -252,7 +356,7 @@ namespace MSFS_AutoFPS
                 }
                 else
                 {
-                    if (!Model.FPSSettleInitial && deltaFPSTrendIndex >= 4) 
+                    if (!Model.FPSSettleInitial && deltaFPSTrendIndex >= 4)
                     {
                         deltaFPSRange = deltaFPSTrend.Skip(deltaFPSTrendIndex - 4).Take(5).Max() - deltaFPSTrend.Skip(deltaFPSTrendIndex - 4).Take(5).Min();
                         if (deltaFPSRangeLowest > deltaFPSRange) deltaFPSRangeLowest = deltaFPSRange;
@@ -270,224 +374,216 @@ namespace MSFS_AutoFPS
                 }
             }
             Model.FPSSettleActiveLast = Model.FPSSettleActive;
+        }
 
-            if (!Model.AppPaused && (!Model.FPSSettleActive || (Model.TLODAutoMethod[Model.activeProfile] == 2) && !Model.MinTLODExtra[Model.activeProfile]))
+        private float ApplyAutoTargetFPSRecalibration(float deltaFPS)
+        {
+            if (Model.AutoTargetFPS && !(Model.FgModeEnabled && !Model.ActiveWindowMSFS) && (Model.ForceAutoFPSCal || (!(Model.FgModeEnabled && !Model.ActiveWindowMSFS) && ((deltaFPS <= -Model.TargetFPS * AutoTargetFPSRecalTolerance && (!Model.DecCloudQ[Model.activeProfile] || Model.DecCloudQActive) && Model.tlod == Model.activeMinTLOD)))))
             {
-                float FPSToleranceAmount = Model.TargetFPS * Model.FPSTolerance[Model.activeProfile] / 100.0f;
-                FPSToleranceExceeded = Math.Abs(deltaFPS) >= FPSToleranceAmount;
-
-                if (Model.AutoTargetFPS && !(Model.FgModeEnabled && !Model.ActiveWindowMSFS) && (Model.ForceAutoFPSCal || (!(Model.FgModeEnabled && !Model.ActiveWindowMSFS) && ((deltaFPS <= -Model.TargetFPS * AutoTargetFPSRecalTolerance && (!Model.DecCloudQ[Model.activeProfile] || Model.DecCloudQActive) && Model.tlod == Model.activeMinTLOD)))))
+                if (!Model.ForceAutoFPSCal && (!Model.UseExpertOptions || Model.MinTLODExtra[Model.activeProfile]) && Model.MinTLODExtraActive)
                 {
-                    if (!Model.ForceAutoFPSCal && (!Model.UseExpertOptions || Model.MinTLODExtra[Model.activeProfile]) && Model.MinTLODExtraActive)
-                    {
-                        Model.MinTLODExtraActive = false;
-                        Model.MinTLODExtraAmount = 0;
-                    }
+                    Model.MinTLODExtraActive = false;
+                    Model.MinTLODExtraAmount = 0;
+                }
+                else
+                {
+                    Model.TargetFPS = (int)(GetAverageFPS() * ((Model.FlightTypeIFR ? 0.95f : 0.90f) - Math.Min(0.1f, Model.altAboveGnd / 30000)));
+                    Model.UpdateTargetFPS = true;
+                    Model.ForceAutoFPSCal = false;
+                    if (deltaFPS <= -Model.TargetFPS * AutoTargetFPSRecalTolerance && (!Model.DecCloudQ[Model.activeProfile] || Model.DecCloudQActive) && Model.tlod == Model.activeMinTLOD) Logger.Log(LogLevel.Information, "LODController:RunTick", "FPS too " + (Model.tlod == Model.activeMinTLOD ? "low" : "high") + " for auto target FPS settings. Auto Target FPS updated to " + $"{Model.TargetFPS}");
                     else
                     {
-                        Model.TargetFPS = (int)(GetAverageFPS() * ((Model.FlightTypeIFR ? 0.95f : 0.90f) - Math.Min(0.1f, Model.altAboveGnd / 30000)));
-                        Model.UpdateTargetFPS = true;
-                        Model.ForceAutoFPSCal = false;
-                        if (deltaFPS <= -Model.TargetFPS * AutoTargetFPSRecalTolerance && (!Model.DecCloudQ[Model.activeProfile] || Model.DecCloudQActive) && Model.tlod == Model.activeMinTLOD) Logger.Log(LogLevel.Information, "LODController:RunTick", "FPS too " + (Model.tlod == Model.activeMinTLOD ? "low" : "high") + " for auto target FPS settings. Auto Target FPS updated to " + $"{Model.TargetFPS}");
-                        else
-                        {
-                            deltaFPS = GetAverageFPS() - Model.TargetFPS;
-                            Logger.Log(LogLevel.Information, "LODController:RunTick", "Auto Target FPS set to " + $"{Model.TargetFPS}");
-                        }
+                        deltaFPS = GetAverageFPS() - Model.TargetFPS;
+                        Logger.Log(LogLevel.Information, "LODController:RunTick", "Auto Target FPS set to " + $"{Model.TargetFPS}");
                     }
                 }
+            }
+            return deltaFPS;
+        }
 
-                if (Model.TLODAutoMethod[Model.activeProfile] == 2)
+        // Dispatched when Model.TLODAutoMethod[Model.activeProfile] == 2 (the "Auto TLOD" altitude-schedule
+        // method): interpolates TLOD across the Alt TLOD Base/Top band and drives the TLOD Base+ seek/
+        // backtrack state machine. Sets the newTLOD field directly, same as the original inline branch did.
+        private void ComputeAutoTLOD(float deltaFPS)
+        {
+            if (!Model.MaxTLODHalvedNight[Model.activeProfile] || !Model.NightTime)
+            {
+                if (Model.MinTLODExtra[Model.activeProfile] && !(Model.FgModeEnabled && !Model.ActiveWindowMSFS) && (Model.DecCloudQMethod[Model.activeProfile] == 1 || !Model.DecCloudQActive) && (deltaFPSTrendShort.Average() <= deltaFPSTrendMin || Model.MinTLODExtraIterations == 1) && Model.MinTLODExtraAmount > 0)
                 {
-                    if (!Model.MaxTLODHalvedNight[Model.activeProfile] || !Model.NightTime)
+                    Model.MinTLODExtraAmount -= Model.MinTLOD[Model.activeProfile];
+                    if (Model.MinTLODExtraAmount > 0)
                     {
-                        if (Model.MinTLODExtra[Model.activeProfile] && !(Model.FgModeEnabled && !Model.ActiveWindowMSFS) && (Model.DecCloudQMethod[Model.activeProfile] == 1 || !Model.DecCloudQActive) && (deltaFPSTrendShort.Average() <= deltaFPSTrendMin || Model.MinTLODExtraIterations == 1) && Model.MinTLODExtraAmount > 0)
-                        {
-                            Model.MinTLODExtraAmount -= Model.MinTLOD[Model.activeProfile];
-                            if (Model.MinTLODExtraAmount > 0)
-                            {
-                                Model.FPSSettleActive = true;
-                                if (Model.MinTLODExtraIterations != 1) Model.MinTLODExtraSeeking = true;
-                            }
-                            else Model.MinTLODExtraAmount = 0;
-                            Model.MinTLODExtraIterations = 0;
-                            Logger.Log(LogLevel.Information, "LODController:RunTick", "TLOD Base + auto-reduced to " + $"{Model.MinTLODExtraAmount}");
-                            SetActiveLODs(true);
-                        }
-                        else if (Model.MinTLODExtra[Model.activeProfile] && !(Model.FgModeEnabled && !Model.ActiveWindowMSFS) && (Model.DecCloudQMethod[Model.activeProfile] == 1 || !Model.DecCloudQActive) && !Model.MinTLODExtraActive && Model.MinTLODExtraIterations > 1 && deltaFPS >= 0 && (Math.Ceiling(Model.tlod) < Model.activeMaxTLOD || !Model.OnGround))
-                        {
-                            Model.MinTLODExtraAmount += Math.Min(Model.MinTLOD[Model.activeProfile], 50.0f);
-                            if (Model.MinTLODExtraAmount + MinTLODNoExtra >= Model.MaxTLOD[Model.activeProfile])
-                            {
-                                Model.MinTLODExtraAmount = Model.MaxTLOD[Model.activeProfile] - MinTLODNoExtra;
-                            }
-                            else
-                            {
-                                Model.MinTLODExtraIterations--;
-                                Model.MinTLODExtraSeeking = true;
-                            }
-                            Model.FPSSettleActive = true;
-                            SetActiveLODs(true);
-                            Logger.Log(LogLevel.Information, "LODController:RunTick", "TLOD Base + auto-increased to " + $"{Model.MinTLODExtraAmount}");
-
-                        }
-                        else if (!(Model.FgModeEnabled && !Model.ActiveWindowMSFS)) Model.MinTLODExtraIterations = 0;
-                    }
-                    if (Model.MinTLODExtra[Model.activeProfile] && Model.MinTLODExtraAmount > 0 && !Model.MinTLODExtraSeeking) Model.MinTLODExtraActive = true;
-                    else Model.MinTLODExtraActive = false;
-                    if (Model.altAboveGnd < Model.AltTLODBase[Model.activeProfile]) newTLOD = Model.activeMinTLOD;
-                    else if (Model.altAboveGnd > Model.AltTLODTop[Model.activeProfile]) newTLOD = Model.activeMaxTLOD;
-                    else
-                    {
-                        newTLOD = Model.activeMinTLOD + (Model.activeMaxTLOD - Model.activeMinTLOD) * (Model.altAboveGnd - Model.AltTLODBase[Model.activeProfile]) / (Model.AltTLODTop[Model.activeProfile] - Model.AltTLODBase[Model.activeProfile]);
-
-                        if (Model.MinTLODExtraSeeking)
-                        {
-                            newTLOD = (float)Math.Round(newTLOD / Model.FPSTolerance[Model.activeProfile]) * Model.FPSTolerance[Model.activeProfile];
-                            if (Model.MinTLODExtraAmount + MinTLODNoExtra >= Model.MaxTLOD[Model.activeProfile] || Model.MinTLODExtraAmount == 0)
-                            {
-                                Model.MinTLODExtraIterations = 0;
-                                Model.MinTLODExtraSeeking = false;
-                            }
-                        }
-                        else
-                        {
-                            if (Math.Abs(newTLOD - Model.tlod) < Model.FPSTolerance[Model.activeProfile]) newTLOD = Model.tlod;
-                            else if (Math.Abs(newTLOD - Model.tlod) > Model.FPSTolerance[Model.activeProfile] * 2) newTLOD = Model.tlod + Math.Sign(newTLOD - Model.tlod) * Model.FPSTolerance[Model.activeProfile] * 2;
-                            else newTLOD = Model.tlod + Math.Sign(newTLOD - Model.tlod) * Model.FPSTolerance[Model.activeProfile];
-                        }
-                    }
-                }
-                else if (Model.MinTLODExtra[Model.activeProfile] && Model.MinTLODExtraActive && !Model.IsAppPriorityFPS && !(Model.FgModeEnabled && !Model.ActiveWindowMSFS) && (Model.DecCloudQMethod[Model.activeProfile] == 1 || !Model.DecCloudQActive) && Math.Round(Model.tlod) == Model.activeMinTLOD && deltaFPS <= -FPSToleranceAmount && Model.MinTLODExtraAmount > 0)
-                {
-                        Model.MinTLODExtraAmount = (float)Math.Floor(Model.MinTLODExtraAmount * 0.8 / 10) * 10;
                         Model.FPSSettleActive = true;
-                        Model.MinTLODExtraSeeking = true;
-                        Model.MinTLODExtraIterations = 1;
-                        SetActiveLODs(true);
-                        newTLOD = Model.activeMinTLOD;
-                        Logger.Log(LogLevel.Information, "LODController:RunTick", "TLOD Min + auto-reduced to " + $"{Model.MinTLODExtraAmount}");
-
+                        if (Model.MinTLODExtraIterations != 1) Model.MinTLODExtraSeeking = true;
+                    }
+                    else Model.MinTLODExtraAmount = 0;
+                    Model.MinTLODExtraIterations = 0;
+                    Logger.Log(LogLevel.Information, "LODController:RunTick", "TLOD Base + auto-reduced to " + $"{Model.MinTLODExtraAmount}");
+                    SetActiveLODs(true);
                 }
-                else if (Model.MinTLODExtra[Model.activeProfile] && !Model.MinTLODExtraActive && !Model.IsAppPriorityFPS && !(Model.FgModeEnabled && !Model.ActiveWindowMSFS) && (Model.DecCloudQMethod[Model.activeProfile] == 1 || !Model.DecCloudQActive) && Model.MinTLODExtraIterations > 1 && deltaFPS >= Model.TargetFPS * MinTLODExtraActiveTolerance && Math.Ceiling(Model.tlod) < Model.activeMaxTLOD)
+                else if (Model.MinTLODExtra[Model.activeProfile] && !(Model.FgModeEnabled && !Model.ActiveWindowMSFS) && (Model.DecCloudQMethod[Model.activeProfile] == 1 || !Model.DecCloudQActive) && !Model.MinTLODExtraActive && Model.MinTLODExtraIterations > 1 && deltaFPS >= 0 && (Math.Ceiling(Model.tlod) < Model.activeMaxTLOD || !Model.OnGround))
                 {
-                    Model.MinTLODExtraAmount += 10.0f * (float)Math.Floor(Math.Pow(deltaFPS, 0.9f) * MinTLODExtraSensitivity / (Model.TargetFPS * MinTLODExtraActiveTolerance));
+                    Model.MinTLODExtraAmount += Math.Min(Model.MinTLOD[Model.activeProfile], 50.0f);
                     if (Model.MinTLODExtraAmount + MinTLODNoExtra >= Model.MaxTLOD[Model.activeProfile])
                     {
                         Model.MinTLODExtraAmount = Model.MaxTLOD[Model.activeProfile] - MinTLODNoExtra;
-                        Model.MinTLODExtraIterations = 1;
                     }
-                    else Model.MinTLODExtraIterations--;
-                    Model.FPSSettleActive = true;
-                    Model.MinTLODExtraSeeking = true;
-                    SetActiveLODs(true);
-                    newTLOD = Model.activeMinTLOD;
-                    Logger.Log(LogLevel.Information, "LODController:RunTick", "TLOD Min + auto-increased to " + $"{Model.MinTLODExtraAmount}");
-                }
-                else
-                {
-                    if (Model.MinTLODExtraSeeking && !(Model.FgModeEnabled && !Model.ActiveWindowMSFS))
-                    {
-                        Model.MinTLODExtraActive = true;
-                        Model.MinTLODExtraSeeking = false;
-                        Model.MinTLODExtraIterations = ServiceModel.MinTLODExtraIterationsMax;
-                    }
-                    else if (Model.MinTLODExtra[Model.activeProfile] && Model.IsAppPriorityFPS && !Model.NightTimeTransiton && (!Model.MaxTLODHalvedNight[Model.activeProfile] || !Model.NightTime))
-                    {
-                        float MinTLODExtraAmountTemp;
-                        MinTLODExtraAmountTemp = (float)Math.Floor((Math.Min(Model.tlod - 2 * TLODStep, Model.MaxTLOD[Model.activeProfile]) * (1 - (Model.FlightTypeIFR ? MinTLODExtraDecentReduction : MinTLODExtraDecentReduction / 2)) - MinTLODNoExtra) / 10) * 10;
-                        if (deltaFPS >= 0) MinTLODExtraAmountTemp += 10.0f * (float)Math.Floor(Math.Pow(deltaFPS, 0.85) * MinTLODExtraSensitivity * 4 / (Model.TargetFPS * MinTLODExtraActiveTolerance));
-                        if (MinTLODExtraAmountTemp + MinTLODNoExtra > Model.activeMaxTLOD - Model.TLODExtraMtnsAmountResidual) MinTLODExtraAmountTemp = Model.activeMaxTLOD - Model.TLODExtraMtnsAmountResidual - MinTLODNoExtra;
-                        Model.MinTLODExtraAmount = Math.Max(Math.Min(MinTLODExtraAmountTemp, Model.tlod - 2 * TLODStep - MinTLODNoExtra), 0);
-                        if (Model.MinTLODExtraAmount == 0) Model.MinTLODExtraActive = false;
-                        else Model.MinTLODExtraActive = true;
-                        SetActiveLODs(true);
-                    }
-                    if (Model.TLODAutoMethod[Model.activeProfile] == 0) newTLOD = Math.Sign(deltaFPS) * (Math.Min((float)Math.Pow(Math.Abs(deltaFPS) / (GetAverageFPS() > 1 ? GetAverageFPS() : 1) * TLODStepAdjusted * 10, 1.4f), TLODStepAdjusted * 2));
-                    else if (FPSToleranceExceeded) newTLOD = Math.Sign(deltaFPS) * TLODStepAdjusted * (Math.Abs(deltaFPS) >= FPSToleranceAmount * 2 ? 2 : 1);
-                    else newTLOD = 0;
-                    if (Model.altAboveGnd <= AltTLODBase) newTLOD = Model.activeMinTLOD;
-                    else newTLOD = Math.Min(Model.activeMinTLOD + (Model.activeMaxTLOD - Model.activeMinTLOD) * (Model.altAboveGnd - AltTLODBase) / TLODMinAltBand, Model.tlod + newTLOD);
-                }
-                newTLOD = (float)Math.Round(Math.Min(Model.activeMaxTLOD, Math.Max(Model.activeMinTLOD, newTLOD)));
-
-                if (Math.Abs(Model.tlod - newTLOD) >= 1)
-                {
-                    Model.MemoryAccess.SetTLOD(Model.tlod = newTLOD);
-                    Model.tlod_step = true;
-                }
-                else Model.tlod_step = false;
-
-                if (Model.DecCloudQ[Model.activeProfile] && !Model.DecCloudQActive && !(Model.MinTLODExtra[Model.activeProfile] &&  Model.MinTLODExtraIterations > 0) && ((Model.TLODAutoMethod[Model.activeProfile] != 2 && Model.DecCloudQMethod[Model.activeProfile] != 1 && Model.tlod == Model.activeMinTLOD && deltaFPS <= -FPSToleranceAmount) || ((Model.TLODAutoMethod[Model.activeProfile] == 2 || Model.DecCloudQMethod[Model.activeProfile] == 1) && Model.gpuUsage > Model.CloudDecreaseGPUPct)))
-                {
-                    if (Model.VrModeActive && Model.DefaultCloudQ_VR >= 1)
-                    {
-                        Model.MemoryAccess.SetCloudQ_VR(Model.cloudQ_VR = (Model.DefaultCloudQ_VR - 1));
-                        Model.DecCloudQActive = true;
-                    }
-                    if (!Model.VrModeActive && Model.DefaultCloudQ >= 1)
-                    {
-                        Model.MemoryAccess.SetCloudQ(Model.cloudQ = (Model.DefaultCloudQ - 1));
-                        Model.DecCloudQActive = true;
-                    }
-                    CloudRecoveryTickMark = TotalTicks;
-                }
-
-                if (Model.DecCloudQ[Model.activeProfile] && Model.DecCloudQActive && ((Model.TLODAutoMethod[Model.activeProfile] != 2 && Model.DecCloudQMethod[Model.activeProfile] != 1 && ((deltaFPS >= Model.TargetFPS * CloudRecoveryExtraTolerance) || (newTLOD >= (Model.UseExpertOptions && Model.CloudRecoveryPlus[Model.activeProfile] ? Model.activeMinTLOD + Model.CloudRecoveryTLOD[Model.activeProfile] : Model.CloudRecoveryTLOD[Model.activeProfile]) && deltaFPS >= 0))) || ((Model.TLODAutoMethod[Model.activeProfile] == 2 || Model.DecCloudQMethod[Model.activeProfile] == 1) && Model.gpuUsage <= Model.CloudRecoverGPUPct)))
-                {
-                    Model.ResetCloudsTLOD(false);
-                    if ((!Model.UseExpertOptions || Model.MinTLODExtra[Model.activeProfile]) && !Model.MinTLODExtraActive && Model.OnGround) Model.FPSSettleActive = true;
-                    if (!Model.UseExpertOptions && Model.altAboveGnd > AltTLODBase && TotalTicks < CloudRecoveryTickMark + 30) CloudRecoveryExtraNonExpert += 20;
-                }
-
-                if (!Model.UseExpertOptions || Model.CustomAutoOLOD[Model.activeProfile])
-                {
-                    float newOLOD;
-                    if (Model.altAboveGnd < Model.AltOLODBase[Model.activeProfile]) newOLOD = Model.activeOLODAtBase;
-                    else if (Model.altAboveGnd > Model.AltOLODTop[Model.activeProfile]) newOLOD = Model.activeOLODAtTop;
                     else
                     {
-                        newOLOD = Model.activeOLODAtBase + (Model.activeOLODAtTop - Model.activeOLODAtBase) * (Model.altAboveGnd - Model.AltOLODBase[Model.activeProfile]) / (Model.AltOLODTop[Model.activeProfile] - Model.AltOLODBase[Model.activeProfile]);
-                        if (Math.Abs(newOLOD - Model.olod) < Model.FPSTolerance[Model.activeProfile]) newOLOD = Model.olod;
-                        else if (Math.Abs(newOLOD - Model.olod) > Model.FPSTolerance[Model.activeProfile] * 2) newOLOD = Model.olod + Math.Sign(newOLOD - Model.olod) * Model.FPSTolerance[Model.activeProfile] * 2;
-                        else newOLOD = Model.olod + Math.Sign(newOLOD - Model.olod) * Model.FPSTolerance[Model.activeProfile];
+                        Model.MinTLODExtraIterations--;
+                        Model.MinTLODExtraSeeking = true;
                     }
-                    if (newOLOD != Model.olod && Math.Abs(newOLOD - Model.olod) >= 1)
+                    Model.FPSSettleActive = true;
+                    SetActiveLODs(true);
+                    Logger.Log(LogLevel.Information, "LODController:RunTick", "TLOD Base + auto-increased to " + $"{Model.MinTLODExtraAmount}");
+
+                }
+                else if (!(Model.FgModeEnabled && !Model.ActiveWindowMSFS)) Model.MinTLODExtraIterations = 0;
+            }
+            if (Model.MinTLODExtra[Model.activeProfile] && Model.MinTLODExtraAmount > 0 && !Model.MinTLODExtraSeeking) Model.MinTLODExtraActive = true;
+            else Model.MinTLODExtraActive = false;
+            if (Model.altAboveGnd < Model.AltTLODBase[Model.activeProfile]) newTLOD = Model.activeMinTLOD;
+            else if (Model.altAboveGnd > Model.AltTLODTop[Model.activeProfile]) newTLOD = Model.activeMaxTLOD;
+            else
+            {
+                newTLOD = Model.activeMinTLOD + (Model.activeMaxTLOD - Model.activeMinTLOD) * (Model.altAboveGnd - Model.AltTLODBase[Model.activeProfile]) / (Model.AltTLODTop[Model.activeProfile] - Model.AltTLODBase[Model.activeProfile]);
+
+                if (Model.MinTLODExtraSeeking)
+                {
+                    newTLOD = (float)Math.Round(newTLOD / Model.FPSTolerance[Model.activeProfile]) * Model.FPSTolerance[Model.activeProfile];
+                    if (Model.MinTLODExtraAmount + MinTLODNoExtra >= Model.MaxTLOD[Model.activeProfile] || Model.MinTLODExtraAmount == 0)
                     {
-                        Model.MemoryAccess.SetOLOD(Model.olod = newOLOD);
-                        Model.olod_step = true;
+                        Model.MinTLODExtraIterations = 0;
+                        Model.MinTLODExtraSeeking = false;
                     }
-                    else Model.olod_step = false;
                 }
                 else
                 {
-                    Model.olod_step = true;
-                    if (Model.VrModeActive && Model.olod != Model.DefaultOLOD_VR)
-                        Model.MemoryAccess.SetOLOD_VR(Model.olod = Model.DefaultOLOD_VR);
-                    else if (!Model.VrModeActive && Model.olod != Model.DefaultOLOD)
-                        Model.MemoryAccess.SetOLOD_PC(Model.olod = Model.DefaultOLOD);
-                    else Model.olod_step = false;
+                    if (Math.Abs(newTLOD - Model.tlod) < Model.FPSTolerance[Model.activeProfile]) newTLOD = Model.tlod;
+                    else if (Math.Abs(newTLOD - Model.tlod) > Model.FPSTolerance[Model.activeProfile] * 2) newTLOD = Model.tlod + Math.Sign(newTLOD - Model.tlod) * Model.FPSTolerance[Model.activeProfile] * 2;
+                    else newTLOD = Model.tlod + Math.Sign(newTLOD - Model.tlod) * Model.FPSTolerance[Model.activeProfile];
                 }
             }
+        }
 
-            Model.rangeMinTLOD = Model.activeMinTLOD;
-            if (Model.altAboveGnd >= AltTLODBase + TLODMinAltBand || Model.TLODAutoMethod[Model.activeProfile] == 2)
+        // Dispatched (see RunTick) when TLOD Min+ is active and FPS has dropped below target at the TLOD
+        // floor: backs off TLOD Min+ by 20%. The dispatch condition (which doesn't reference any state this
+        // body doesn't already read from Model) stays in RunTick, unchanged, since it's what makes this
+        // branch mutually exclusive with the other three.
+        private void ReduceMinTLODExtraForLowFPS()
+        {
+            Model.MinTLODExtraAmount = (float)Math.Floor(Model.MinTLODExtraAmount * 0.8 / 10) * 10;
+            Model.FPSSettleActive = true;
+            Model.MinTLODExtraSeeking = true;
+            Model.MinTLODExtraIterations = 1;
+            SetActiveLODs(true);
+            newTLOD = Model.activeMinTLOD;
+            Logger.Log(LogLevel.Information, "LODController:RunTick", "TLOD Min + auto-reduced to " + $"{Model.MinTLODExtraAmount}");
+        }
+
+        // Dispatched (see RunTick) when TLOD Min+ is inactive and FPS headroom above target allows raising
+        // it further.
+        private void IncreaseMinTLODExtraForHighFPS(float deltaFPS)
+        {
+            Model.MinTLODExtraAmount += 10.0f * (float)Math.Floor(Math.Pow(deltaFPS, 0.9f) * MinTLODExtraSensitivity / (Model.TargetFPS * MinTLODExtraActiveTolerance));
+            if (Model.MinTLODExtraAmount + MinTLODNoExtra >= Model.MaxTLOD[Model.activeProfile])
             {
-                Model.IsAppPriorityFPS = true;
-                Model.rangeMaxTLOD = Model.activeMaxTLOD;
+                Model.MinTLODExtraAmount = Model.MaxTLOD[Model.activeProfile] - MinTLODNoExtra;
+                Model.MinTLODExtraIterations = 1;
+            }
+            else Model.MinTLODExtraIterations--;
+            Model.FPSSettleActive = true;
+            Model.MinTLODExtraSeeking = true;
+            SetActiveLODs(true);
+            newTLOD = Model.activeMinTLOD;
+            Logger.Log(LogLevel.Information, "LODController:RunTick", "TLOD Min + auto-increased to " + $"{Model.MinTLODExtraAmount}");
+        }
+
+        // The fallback branch: FPS Sensitivity/Tolerance TLOD stepping, plus TLOD Min+ tracking while FPS
+        // (not TLOD) has automation priority.
+        private void ComputeFPSBasedTLOD(float deltaFPS, float FPSToleranceAmount)
+        {
+            if (Model.MinTLODExtraSeeking && !(Model.FgModeEnabled && !Model.ActiveWindowMSFS))
+            {
+                Model.MinTLODExtraActive = true;
+                Model.MinTLODExtraSeeking = false;
+                Model.MinTLODExtraIterations = ServiceModel.MinTLODExtraIterationsMax;
+            }
+            else if (Model.MinTLODExtra[Model.activeProfile] && Model.IsAppPriorityFPS && !Model.NightTimeTransiton && (!Model.MaxTLODHalvedNight[Model.activeProfile] || !Model.NightTime))
+            {
+                float MinTLODExtraAmountTemp;
+                MinTLODExtraAmountTemp = (float)Math.Floor((Math.Min(Model.tlod - 2 * TLODStep, Model.MaxTLOD[Model.activeProfile]) * (1 - (Model.FlightTypeIFR ? MinTLODExtraDecentReduction : MinTLODExtraDecentReduction / 2)) - MinTLODNoExtra) / 10) * 10;
+                if (deltaFPS >= 0) MinTLODExtraAmountTemp += 10.0f * (float)Math.Floor(Math.Pow(deltaFPS, 0.85) * MinTLODExtraSensitivity * 4 / (Model.TargetFPS * MinTLODExtraActiveTolerance));
+                if (MinTLODExtraAmountTemp + MinTLODNoExtra > Model.activeMaxTLOD - Model.TLODExtraMtnsAmountResidual) MinTLODExtraAmountTemp = Model.activeMaxTLOD - Model.TLODExtraMtnsAmountResidual - MinTLODNoExtra;
+                Model.MinTLODExtraAmount = Math.Max(Math.Min(MinTLODExtraAmountTemp, Model.tlod - 2 * TLODStep - MinTLODNoExtra), 0);
+                if (Model.MinTLODExtraAmount == 0) Model.MinTLODExtraActive = false;
+                else Model.MinTLODExtraActive = true;
+                SetActiveLODs(true);
+            }
+            if (Model.TLODAutoMethod[Model.activeProfile] == 0) newTLOD = Math.Sign(deltaFPS) * (Math.Min((float)Math.Pow(Math.Abs(deltaFPS) / (GetAverageFPS() > 1 ? GetAverageFPS() : 1) * TLODStepAdjusted * 10, 1.4f), TLODStepAdjusted * 2));
+            else if (FPSToleranceExceeded) newTLOD = Math.Sign(deltaFPS) * TLODStepAdjusted * (Math.Abs(deltaFPS) >= FPSToleranceAmount * 2 ? 2 : 1);
+            else newTLOD = 0;
+            if (Model.altAboveGnd <= AltTLODBase) newTLOD = Model.activeMinTLOD;
+            else newTLOD = Math.Min(Model.activeMinTLOD + (Model.activeMaxTLOD - Model.activeMinTLOD) * (Model.altAboveGnd - AltTLODBase) / TLODMinAltBand, Model.tlod + newTLOD);
+        }
+
+        private void UpdateCloudQuality(float deltaFPS, float FPSToleranceAmount, float newTLOD)
+        {
+            if (Model.DecCloudQ[Model.activeProfile] && !Model.DecCloudQActive && !(Model.MinTLODExtra[Model.activeProfile] &&  Model.MinTLODExtraIterations > 0) && ((Model.TLODAutoMethod[Model.activeProfile] != 2 && Model.DecCloudQMethod[Model.activeProfile] != 1 && Model.tlod == Model.activeMinTLOD && deltaFPS <= -FPSToleranceAmount) || ((Model.TLODAutoMethod[Model.activeProfile] == 2 || Model.DecCloudQMethod[Model.activeProfile] == 1) && Model.gpuUsage > Model.CloudDecreaseGPUPct)))
+            {
+                if (Model.VrModeActive && Model.DefaultCloudQ_VR >= 1)
+                {
+                    Model.MemoryAccess.SetCloudQ_VR(Model.cloudQ_VR = (Model.DefaultCloudQ_VR - 1));
+                    Model.DecCloudQActive = true;
+                }
+                if (!Model.VrModeActive && Model.DefaultCloudQ >= 1)
+                {
+                    Model.MemoryAccess.SetCloudQ(Model.cloudQ = (Model.DefaultCloudQ - 1));
+                    Model.DecCloudQActive = true;
+                }
+                CloudRecoveryTickMark = TotalTicks;
+            }
+
+            if (Model.DecCloudQ[Model.activeProfile] && Model.DecCloudQActive && ((Model.TLODAutoMethod[Model.activeProfile] != 2 && Model.DecCloudQMethod[Model.activeProfile] != 1 && ((deltaFPS >= Model.TargetFPS * CloudRecoveryExtraTolerance) || (newTLOD >= (Model.UseExpertOptions && Model.CloudRecoveryPlus[Model.activeProfile] ? Model.activeMinTLOD + Model.CloudRecoveryTLOD[Model.activeProfile] : Model.CloudRecoveryTLOD[Model.activeProfile]) && deltaFPS >= 0))) || ((Model.TLODAutoMethod[Model.activeProfile] == 2 || Model.DecCloudQMethod[Model.activeProfile] == 1) && Model.gpuUsage <= Model.CloudRecoverGPUPct)))
+            {
+                Model.ResetCloudsTLOD(false);
+                if ((!Model.UseExpertOptions || Model.MinTLODExtra[Model.activeProfile]) && !Model.MinTLODExtraActive && Model.OnGround) Model.FPSSettleActive = true;
+                if (!Model.UseExpertOptions && Model.altAboveGnd > AltTLODBase && TotalTicks < CloudRecoveryTickMark + 30) CloudRecoveryExtraNonExpert += 20;
+            }
+        }
+
+        private void UpdateOLOD()
+        {
+            if (!Model.UseExpertOptions || Model.CustomAutoOLOD[Model.activeProfile])
+            {
+                float newOLOD;
+                if (Model.altAboveGnd < Model.AltOLODBase[Model.activeProfile]) newOLOD = Model.activeOLODAtBase;
+                else if (Model.altAboveGnd > Model.AltOLODTop[Model.activeProfile]) newOLOD = Model.activeOLODAtTop;
+                else
+                {
+                    newOLOD = Model.activeOLODAtBase + (Model.activeOLODAtTop - Model.activeOLODAtBase) * (Model.altAboveGnd - Model.AltOLODBase[Model.activeProfile]) / (Model.AltOLODTop[Model.activeProfile] - Model.AltOLODBase[Model.activeProfile]);
+                    if (Math.Abs(newOLOD - Model.olod) < Model.FPSTolerance[Model.activeProfile]) newOLOD = Model.olod;
+                    else if (Math.Abs(newOLOD - Model.olod) > Model.FPSTolerance[Model.activeProfile] * 2) newOLOD = Model.olod + Math.Sign(newOLOD - Model.olod) * Model.FPSTolerance[Model.activeProfile] * 2;
+                    else newOLOD = Model.olod + Math.Sign(newOLOD - Model.olod) * Model.FPSTolerance[Model.activeProfile];
+                }
+                if (newOLOD != Model.olod && Math.Abs(newOLOD - Model.olod) >= 1)
+                {
+                    Model.MemoryAccess.SetOLOD(Model.olod = newOLOD);
+                    Model.olod_step = true;
+                }
+                else Model.olod_step = false;
             }
             else
             {
-                Model.IsAppPriorityFPS = false;
-                if (Model.altAboveGnd >= AltTLODBase) Model.rangeMaxTLOD = (float)Math.Round(Math.Min(Model.activeMinTLOD + (Model.activeMaxTLOD - Model.activeMinTLOD) * (Model.altAboveGnd - AltTLODBase) / TLODMinAltBand, Model.activeMaxTLOD) / 10) * 10;
-                else Model.rangeMaxTLOD = Model.activeMinTLOD;
+                Model.olod_step = true;
+                if (Model.VrModeActive && Model.olod != Model.DefaultOLOD_VR)
+                    Model.MemoryAccess.SetOLOD_VR(Model.olod = Model.DefaultOLOD_VR);
+                else if (!Model.VrModeActive && Model.olod != Model.DefaultOLOD)
+                    Model.MemoryAccess.SetOLOD_PC(Model.olod = Model.DefaultOLOD);
+                else Model.olod_step = false;
             }
-
-            TotalTicks++;
-            altAboveGndLast = Model.altAboveGnd;
-            groundSpeedLast = Model.groundSpeed;
-            NightTimeLast = Model.NightTime;
         }
+
         public int VerticalAverage()
         {
             return verticalStats.Sum();
