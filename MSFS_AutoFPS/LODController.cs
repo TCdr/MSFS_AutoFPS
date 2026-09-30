@@ -63,9 +63,23 @@ namespace MSFS_AutoFPS
         private float AltTLODBase;
         private int VRStateCounter = 5;
         private int TLODExtraMtnsTimer;
+        // Ground-seek damping. On the ground TLOD is pinned to activeMinTLOD, so the only TLOD writes come
+        // from the "TLOD Min +" headroom seek. Every TLOD write makes MSFS re-stream the terrain quadtree,
+        // which (a) stutters, and (b) costs FPS for a few seconds - long enough for the 5 s FPS average to
+        // read the hitch as "TLOD too high" and step down again, cascading reload after reload at the gate.
+        // These limits break that loop: small steps, a cooldown between steps so the FPS average settles on
+        // the new state before it is judged, no seeking while taxiing, and a few consecutive low-FPS ticks
+        // before a reduction. In flight nothing here applies.
+        private const int GroundSeekCooldownTicks = 20;      // ticks (~seconds) between Min+ changes on the ground
+        private const float GroundSeekMaxStep = 20.0f;        // max TLOD change per Min+ step on the ground
+        private const int GroundReduceConfirmTicks = 3;       // consecutive below-tolerance ticks before a ground reduction
+        private const float GroundSeekMaxGroundSpeed = 5.0f;  // knots - above this the aircraft is taxiing, no seeking
+        private int groundSeekCooldown = 0;
+        private int groundLowFPSTicks = 0;
         private int logTimer = 0;
         private int logTimerInterval = 9;
         private float logAltAboveGndLast = -1;
+        private float logFPSLast = -1;
         private float logTlodLast = -1;
         private float logOlodLast = -1;
         private bool logDecCloudQActiveLast = true;
@@ -173,10 +187,11 @@ namespace MSFS_AutoFPS
 
             SetActiveLODs();
 
-            if ((ServiceModel.TestVersion || Model.LogSimValues) && logTimer == 0 && (!Model.FPSSettleActive || Model.TLODAutoMethod[Model.activeProfile] == 2) && (Math.Round(Model.altAboveGnd) != Math.Round(logAltAboveGndLast) || Math.Round(Model.tlod) != Math.Round(logTlodLast) || Math.Round(Model.olod) != Math.Round(logOlodLast) || logDecCloudQActiveLast != Model.DecCloudQActive || logNightTimeLast != Model.NightTime || logIsAppPriorityFPSLast != Model.IsAppPriorityFPS || Math.Round(Model.rangeMinTLOD) != Math.Round(logRangeMinTLODLast)) && !(!Model.ActiveWindowMSFS && Model.UseExpertOptions && Model.PauseMSFSFocusLost))
+            if ((ServiceModel.TestVersion || Model.LogSimValues) && logTimer == 0 && (!Model.FPSSettleActive || Model.TLODAutoMethod[Model.activeProfile] == 2) && (Math.Round(GetAverageFPS()) != Math.Round(logFPSLast) || Math.Round(Model.altAboveGnd) != Math.Round(logAltAboveGndLast) || Math.Round(Model.tlod) != Math.Round(logTlodLast) || Math.Round(Model.olod) != Math.Round(logOlodLast) || logDecCloudQActiveLast != Model.DecCloudQActive || logNightTimeLast != Model.NightTime || logIsAppPriorityFPSLast != Model.IsAppPriorityFPS || Math.Round(Model.rangeMinTLOD) != Math.Round(logRangeMinTLODLast)) && !(!Model.ActiveWindowMSFS && Model.UseExpertOptions && Model.PauseMSFSFocusLost))
             {
                 Logger.Log(LogLevel.Information, "LODController:UpdateVariables", $"FPS: {GetAverageFPS()}" + (Model.FgModeEnabled ? " FGAct: " + Model.ActiveWindowMSFS : "") + $" Pri: {(Model.TLODAutoMethod[Model.activeProfile] == 2 ? "ATLOD" : (Model.IsAppPriorityFPS ? "FPS" : "TLOD"))}{(Model.MinTLODExtraActive ? "+ " + Model.MinTLODExtraAmount : "")} Night: {Model.NightTime} TLOD: {Math.Round(Model.tlod)} TLODRng: {Model.rangeMinTLOD}{(Model.rangeMinTLOD == Model.rangeMaxTLOD ? "" : "-" + Model.rangeMaxTLOD)} Mtns+: {Model.TLODExtraMtnsAmountResidual} OLOD: {Math.Round(Model.olod)} AGL: {Math.Round(Model.altAboveGnd)} FPM: {Math.Round(vs * 60.0f)} Clouds: {(Model.VrModeActive ? ServiceModel.CloudQualityText(Model.cloudQ_VR) : ServiceModel.CloudQualityText(Model.cloudQ))}" + (Model.gpuUsage >= 0 ? $" GPU: {Math.Round(Model.gpuUsage)}%" : ""));
                 logTimer = logTimerInterval;
+                logFPSLast = GetAverageFPS();
                 logAltAboveGndLast = Model.altAboveGnd;
                 logTlodLast = Model.tlod;
                 logOlodLast = Model.olod;
@@ -199,6 +214,9 @@ namespace MSFS_AutoFPS
             UpdateMinTLODExtraPreTakeoffTracking();
             UpdateFPSSettleStateMachine(deltaFPS);
 
+            // The cooldown counts down every tick, including settle ticks, so it measures real elapsed time.
+            if (groundSeekCooldown > 0) groundSeekCooldown--;
+
             if (!Model.AppPaused && (!Model.FPSSettleActive || (Model.TLODAutoMethod[Model.activeProfile] == 2) && !Model.MinTLODExtra[Model.activeProfile]))
             {
                 float FPSToleranceAmount = Model.TargetFPS * Model.FPSTolerance[Model.activeProfile] / 100.0f;
@@ -206,17 +224,34 @@ namespace MSFS_AutoFPS
 
                 deltaFPS = ApplyAutoTargetFPSRecalibration(deltaFPS);
 
+                // Ground-seek damping (see the field comments). In flight both gates are open, so the two
+                // Min+ branches below dispatch exactly as they always did.
+                bool groundSeekAllowed = !Model.OnGround || (groundSeekCooldown == 0 && Model.groundSpeed <= GroundSeekMaxGroundSpeed);
+                if (!Model.OnGround) groundLowFPSTicks = 0;
+                else if (deltaFPS > -FPSToleranceAmount) groundLowFPSTicks = 0;
+                else if (groundSeekCooldown == 0) groundLowFPSTicks++;   // holds (does not count) during the cooldown
+                bool groundReduceConfirmed = !Model.OnGround || groundLowFPSTicks >= GroundReduceConfirmTicks;
+
                 if (Model.TLODAutoMethod[Model.activeProfile] == 2)
                 {
                     ComputeAutoTLOD(deltaFPS);
                 }
-                else if (Model.MinTLODExtra[Model.activeProfile] && Model.MinTLODExtraActive && !Model.IsAppPriorityFPS && !(Model.FgModeEnabled && !Model.ActiveWindowMSFS) && (Model.DecCloudQMethod[Model.activeProfile] == 1 || !Model.DecCloudQActive) && Math.Round(Model.tlod) == Model.activeMinTLOD && deltaFPS <= -FPSToleranceAmount && Model.MinTLODExtraAmount > 0)
+                else if (Model.MinTLODExtra[Model.activeProfile] && Model.MinTLODExtraActive && !Model.IsAppPriorityFPS && !(Model.FgModeEnabled && !Model.ActiveWindowMSFS) && (Model.DecCloudQMethod[Model.activeProfile] == 1 || !Model.DecCloudQActive) && Math.Round(Model.tlod) == Model.activeMinTLOD && deltaFPS <= -FPSToleranceAmount && Model.MinTLODExtraAmount > 0 && groundSeekAllowed && groundReduceConfirmed)
                 {
                     ReduceMinTLODExtraForLowFPS();
                 }
-                else if (Model.MinTLODExtra[Model.activeProfile] && !Model.MinTLODExtraActive && !Model.IsAppPriorityFPS && !(Model.FgModeEnabled && !Model.ActiveWindowMSFS) && (Model.DecCloudQMethod[Model.activeProfile] == 1 || !Model.DecCloudQActive) && Model.MinTLODExtraIterations > 1 && deltaFPS >= Model.TargetFPS * MinTLODExtraActiveTolerance && Math.Ceiling(Model.tlod) < Model.activeMaxTLOD)
+                else if (Model.MinTLODExtra[Model.activeProfile] && !Model.MinTLODExtraActive && !Model.IsAppPriorityFPS && !(Model.FgModeEnabled && !Model.ActiveWindowMSFS) && (Model.DecCloudQMethod[Model.activeProfile] == 1 || !Model.DecCloudQActive) && Model.MinTLODExtraIterations > 1 && deltaFPS >= Model.TargetFPS * MinTLODExtraActiveTolerance && Math.Ceiling(Model.tlod) < Model.activeMaxTLOD && groundSeekAllowed)
                 {
                     IncreaseMinTLODExtraForHighFPS(deltaFPS);
+                }
+                else if (Model.OnGround && !groundSeekAllowed && Model.MinTLODExtraSeeking)
+                {
+                    // Seek paused by the ground damping (cooldown, or taxiing): hold TLOD at the current floor
+                    // and leave the seek state alone, so it resumes once the gate reopens. Falling through to
+                    // ComputeFPSBasedTLOD would end the seek after a single step - its first block reads
+                    // "seeking but not stepping" as "seek finished". On the ground it would then pin newTLOD
+                    // to activeMinTLOD anyway, which is what we do here.
+                    newTLOD = Model.activeMinTLOD;
                 }
                 else
                 {
@@ -370,7 +405,13 @@ namespace MSFS_AutoFPS
                     Model.FPSSettleActive = false;
                     Model.FPSSettleInitial = false;
                     Model.FPSSettleCount = ServiceModel.FPSSettleCountMax;
-                    Model.MinTLODExtraSeeking = false;
+                    // Only the Auto TLOD method (2) treats this flag as part of the settle itself. For the
+                    // FPS-based methods the seek is finalised by RunTick's dispatch (ComputeFPSBasedTLOD sets
+                    // MinTLODExtraActive), so the flag has to survive a settle timeout: clearing it here left
+                    // Min+ applied but never "active", and the reduce branch - which requires "active" - could
+                    // then never bring the TLOD floor back down. Timeouts are common, not rare: the seek settle
+                    // only exits early while FPS is still moving, so a perfectly flat FPS always runs to the wrap.
+                    if (Model.TLODAutoMethod[Model.activeProfile] == 2) Model.MinTLODExtraSeeking = false;
                 }
             }
             Model.FPSSettleActiveLast = Model.FPSSettleActive;
@@ -472,7 +513,15 @@ namespace MSFS_AutoFPS
         // branch mutually exclusive with the other three.
         private void ReduceMinTLODExtraForLowFPS()
         {
-            Model.MinTLODExtraAmount = (float)Math.Floor(Model.MinTLODExtraAmount * 0.8 / 10) * 10;
+            float reducedAmount = (float)Math.Floor(Model.MinTLODExtraAmount * 0.8 / 10) * 10;
+            if (Model.OnGround)
+            {
+                // Small step and a cooldown, so one terrain reload is judged on settled FPS before the next.
+                reducedAmount = Math.Max(reducedAmount, Model.MinTLODExtraAmount - GroundSeekMaxStep);
+                groundSeekCooldown = GroundSeekCooldownTicks;
+                groundLowFPSTicks = 0;
+            }
+            Model.MinTLODExtraAmount = reducedAmount;
             Model.FPSSettleActive = true;
             Model.MinTLODExtraSeeking = true;
             Model.MinTLODExtraIterations = 1;
@@ -485,7 +534,16 @@ namespace MSFS_AutoFPS
         // it further.
         private void IncreaseMinTLODExtraForHighFPS(float deltaFPS)
         {
-            Model.MinTLODExtraAmount += 10.0f * (float)Math.Floor(Math.Pow(deltaFPS, 0.9f) * MinTLODExtraSensitivity / (Model.TargetFPS * MinTLODExtraActiveTolerance));
+            float increase = 10.0f * (float)Math.Floor(Math.Pow(deltaFPS, 0.9f) * MinTLODExtraSensitivity / (Model.TargetFPS * MinTLODExtraActiveTolerance));
+            if (Model.OnGround)
+            {
+                // Small step and a cooldown: at the gate a slower climb to the headroom is invisible, a
+                // 50-150 TLOD jump is a visible terrain reload.
+                increase = Math.Min(increase, GroundSeekMaxStep);
+                groundSeekCooldown = GroundSeekCooldownTicks;
+                groundLowFPSTicks = 0;
+            }
+            Model.MinTLODExtraAmount += increase;
             if (Model.MinTLODExtraAmount + MinTLODNoExtra >= Model.MaxTLOD[Model.activeProfile])
             {
                 Model.MinTLODExtraAmount = Model.MaxTLOD[Model.activeProfile] - MinTLODNoExtra;
