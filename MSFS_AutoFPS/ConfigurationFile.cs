@@ -1,6 +1,7 @@
 ﻿using System.Collections.Generic;
 using System.IO;
 using System.Security.RightsManagement;
+using System.Windows;
 using System.Xml;
 
 namespace MSFS_AutoFPS
@@ -34,7 +35,22 @@ namespace MSFS_AutoFPS
 
             ConfigFile = targetConfigFile;
             xmlDoc = new();
-            xmlDoc.LoadXml(File.ReadAllText(ConfigFile));
+            // A config file that is present but unreadable (seen after a PC crash during a save: the file
+            // was left the right size but filled with zero bytes) must not take the whole app down with an
+            // unhandled XmlException before anything is even logged. Fall back to the last known-good copy
+            // (written by SaveConfiguration), else to the bundled template, and tell the user.
+            if (!TryLoadXml(ConfigFile))
+            {
+                string backupFile = ConfigFile + ".bak";
+                string templateFile = Path.Combine(Directory.GetCurrentDirectory(), Path.GetFileName(ConfigFile));
+                string restoredFrom;
+                if (TryLoadXml(backupFile)) restoredFrom = "the backup of the last good configuration";
+                else if (TryLoadXml(templateFile)) restoredFrom = "the default configuration (your settings were lost)";
+                else throw new FileLoadException($"Configuration file {ConfigFile} is unreadable and no backup or default is available.");
+                xmlDoc.Save(ConfigFile);
+                MessageBox.Show($"The configuration file\n{ConfigFile}\nwas damaged and has been restored from {restoredFrom}.",
+                    "MSFS_AutoFPS Configuration", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
 
             XmlNode xmlSettings = xmlDoc.ChildNodes[1];
             appSettings.Clear();
@@ -49,12 +65,38 @@ namespace MSFS_AutoFPS
             else return false;
         }
 
+        // Loads the file into xmlDoc and checks it has the <appSettings> element the rest of this class
+        // indexes as ChildNodes[1]. Returns false (leaving xmlDoc empty) for a missing, empty or
+        // unparseable file instead of throwing.
+        private bool TryLoadXml(string file)
+        {
+            try
+            {
+                if (!File.Exists(file)) return false;
+                string text = File.ReadAllText(file);
+                if (string.IsNullOrWhiteSpace(text) || text.IndexOf('\0') >= 0) return false;
+                xmlDoc = new();
+                xmlDoc.LoadXml(text);
+                return xmlDoc.ChildNodes.Count > 1 && xmlDoc.ChildNodes[1].Name == "appSettings";
+            }
+            catch (XmlException)
+            {
+                xmlDoc = new();
+                return false;
+            }
+        }
+
         public void SaveConfiguration()
         {
             foreach (XmlNode child in xmlDoc.ChildNodes[1])
                 child.Attributes["value"].Value = appSettings[child.Attributes["key"].Value];
 
-            xmlDoc.Save(ConfigFile);
+            // Write to a temporary file and swap it in, so a crash mid-write can never leave the real
+            // config half-written; the previous file becomes the .bak that LoadConfiguration falls back to.
+            string tempFile = ConfigFile + ".tmp";
+            xmlDoc.Save(tempFile);
+            if (File.Exists(ConfigFile)) File.Replace(tempFile, ConfigFile, ConfigFile + ".bak");
+            else File.Move(tempFile, ConfigFile);
         }
 
         public bool SettingExists(string key) 
